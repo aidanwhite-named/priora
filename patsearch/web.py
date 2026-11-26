@@ -305,19 +305,25 @@ def resume_run(run_id: str) -> dict:
     return {"id": run_id}
 
 
-def stop_run(run_id: str) -> dict:
-    run_dir = run_dir_of(run_id)
-    proc = PROCS.get(run_id)
-    if proc is None or proc.poll() is not None:
-        raise ApiError(409, "이 화면에서 시작한 실행만 중지할 수 있습니다")
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """프로세스와 그 아래에서 돌던 LLM CLI 까지 한꺼번에 끝낸다."""
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                       creationflags=0x08000000)
     else:
         proc.terminate()
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+
+def stop_run(run_id: str) -> dict:
+    run_dir = run_dir_of(run_id)
+    proc = PROCS.get(run_id)
+    if proc is None or proc.poll() is not None:
+        raise ApiError(409, "이 화면에서 시작한 실행만 중지할 수 있습니다")
+    _kill_tree(proc)
     # 중지 직전에 스스로 끝난 경우(완료·오류)에는 그 상태를 덮어쓰지 않는다
     status = runs._read_json(run_dir / "status.json") or {}
     if status.get("state", "running") == "running":
@@ -556,6 +562,46 @@ def _compare_spawn(run_id: str, args: list) -> None:
     threading.Thread(target=reap, daemon=True).start()
 
 
+def compare_stop(run_id: str) -> dict:
+    cdir = _compare_dir(run_id)
+    proc = PROCS.get(f"{run_id}:compare")
+    if proc is None or proc.poll() is not None:
+        raise ApiError(409, "실행 중인 구성대비가 없습니다")
+    _kill_tree(proc)
+    status = runs._read_json(cdir / "status.json") or {}
+    if status.get("state", "running") == "running":
+        runs.write_status(cdir, "stopped", message="사용자가 중지했습니다. 다시 실행하면 처음부터 대비합니다.", pid=0)
+        with open(cdir / "run.log", "a", encoding="utf-8") as f:
+            f.write("사용자가 중지했습니다.\n")
+    return compare_state(run_id)
+
+
+# --- CLI 로그인 ------------------------------------------------------------------
+def _cli_id(name: str) -> str:
+    if name not in llm.CLIS:
+        raise ApiError(404, "지원하지 않는 CLI 입니다")
+    return name
+
+
+def auth_list() -> dict:
+    """모든 CLI 의 설치·로그인 상태. CLI 마다 몇 초씩 걸리므로 동시에 확인한다."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(len(llm.CLIS)) as pool:
+        items = list(pool.map(llm.auth_status, llm.CLIS))
+    return {"clis": items, "current": load_settings()["cli"]}
+
+
+def auth_action(name: str, action: str) -> dict:
+    name = _cli_id(name)
+    if not shutil.which(llm.CLIS[name]["exe"]):
+        raise ApiError(400, f'{llm.CLIS[name]["label"]} 가 설치되어 있지 않습니다')
+    try:
+        result = llm.login(name) if action == "login" else llm.logout(name)
+    except llm.LLMError as e:
+        raise ApiError(400, str(e)) from None
+    return {**result, "status": llm.auth_status(name)}
+
+
 def compare_compose(run_id: str, body: dict) -> dict:
     """인용발명 순서를 바꿔 양식만 다시 만든다. 저장된 판정을 쓰므로 LLM 을 부르지 않는다."""
     run_dir = run_dir_of(run_id)
@@ -645,6 +691,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, path.read_bytes(), STATIC_FILES[parts[0]], cache=True)
                 if parts == ["api", "state"]:
                     return self._json(app_state())
+                if parts == ["api", "auth"]:
+                    return self._json(auth_list())
+                if len(parts) == 3 and parts[:2] == ["api", "auth"]:
+                    return self._json(llm.auth_status(_cli_id(parts[2])))
                 if parts == ["api", "runs"]:
                     return self._json(list_runs())
                 if len(parts) == 3 and parts[:2] == ["api", "runs"]:
@@ -669,6 +719,10 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json(compare_compose(parts[2], self._body()))
                     if parts[4] == "dependents":
                         return self._json(compare_dependents(parts[2], self._body()))
+                    if parts[4] == "stop":
+                        return self._json(compare_stop(parts[2]))
+                if len(parts) == 4 and parts[:2] == ["api", "auth"] and parts[3] in ("login", "logout"):
+                    return self._json(auth_action(parts[2], parts[3]))
                 if parts == ["api", "claims", "preview"]:
                     return self._json(claims_preview(self._body()))
                 if parts == ["api", "settings"]:

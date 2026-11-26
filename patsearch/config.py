@@ -63,6 +63,8 @@ DEFAULT_SETTINGS = {
     "models": {
         "claude": {"model": "sonnet", "screen_model": "haiku"},
         "codex": {"model": "", "screen_model": ""},
+        "antigravity": {"model": "", "screen_model": ""},
+        "gemini": {"model": "", "screen_model": ""},
     },
     "max_screen": 300,
 }

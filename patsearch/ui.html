@@ -30,12 +30,34 @@ aside{background:var(--side);border-right:1px solid var(--line);display:flex;fle
 .c-ok{color:var(--ok);background:var(--ok-bg)}.c-warn{color:var(--warn);background:var(--warn-bg)}
 .c-err{color:var(--err);background:var(--err-bg)}.c-idle{color:var(--idle);background:var(--idle-bg)}
 .c-run{color:var(--accent-strong);background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent-line)}
-/* 창 가운데 위: 새 검색 / 구성대비 */
+/* 창 가운데 위: 검색 / 구성대비 */
 .topbar{position:sticky;top:0;z-index:5;display:flex;justify-content:center;padding:12px 16px 10px;background:var(--bg);border-bottom:1px solid var(--line)}
 .modes{display:inline-flex;gap:4px;padding:4px;background:var(--side);border:1px solid var(--line);border-radius:11px}
-.mode{border:1px solid transparent;background:none;border-radius:8px;padding:7px 14px;min-width:140px;cursor:pointer;color:var(--mute);font-weight:600}
-.mode:hover{color:var(--ink)}
-.mode.on{background:var(--card);border-color:var(--accent-line);color:var(--accent-strong);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.mode{border:1px solid transparent;background:none;border-radius:8px;padding:9px 18px;min-width:160px;cursor:pointer;color:var(--mute);font-weight:700;font-size:15px;display:inline-flex;gap:8px;align-items:center;justify-content:center}
+.mode .ic{font-size:17px;line-height:1}
+.mode:hover{color:var(--ink);background:var(--card)}
+.mode.on{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:0 2px 6px rgba(53,82,127,.28)}
+@media (prefers-color-scheme:dark){.mode.on{color:#16171a}}
+/* 크게 눈에 띄는 실행 버튼(검색·구성대비 시작)과 중지 버튼 */
+.btn.go{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700;font-size:16px;padding:11px 26px;border-radius:9px;box-shadow:0 2px 8px rgba(53,82,127,.28);display:inline-flex;gap:9px;align-items:center}
+.btn.go:hover:not(:disabled){filter:brightness(1.08);border-color:var(--accent)}
+.btn.go .ic{font-size:18px;line-height:1}
+@media (prefers-color-scheme:dark){.btn.go{color:#16171a}}
+.btn.stop{background:var(--err);border-color:var(--err);color:#fff;font-weight:700;display:inline-flex;gap:7px;align-items:center}
+.btn.stop:hover:not(:disabled){filter:brightness(1.08);border-color:var(--err)}
+@media (prefers-color-scheme:dark){.btn.stop{color:#16171a}}
+.runbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px;padding:11px 14px;border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:9px;color:var(--accent-strong)}
+.runbar .grow{flex:1;min-width:200px}
+/* CLI 연결 */
+.cli-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;align-items:center;padding:14px 0;border-top:1px solid var(--line)}
+.cli-card:first-of-type{border-top:0}
+.cli-card .nm{font-weight:700;font-size:15px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.cli-card .acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--idle);flex:none}
+.dot.ok{background:var(--ok)}.dot.err{background:var(--err)}.dot.warn{background:var(--warn)}
+.conn{display:flex;gap:7px;align-items:center;font-size:12px;color:var(--mute);background:none;border:0;cursor:pointer;padding:3px 4px;border-radius:6px;min-width:0}
+.conn:hover{color:var(--ink);background:var(--card)}
+.conn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mode:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .duo{display:grid;gap:16px;grid-template-columns:minmax(0,1fr);margin-top:16px}
 .duo .card{margin-top:0;min-width:0}
@@ -128,12 +150,13 @@ iframe{width:100%;height:82vh;border:1px solid var(--line);border-radius:0 10px 
     <a class="brand" href="/" id="home" title="첫 화면으로"><img src="/emblem.svg" alt="" id="emblem"><div><h1 id="appName">Priora</h1><div class="tag" id="appTag">청구항 기반 선행기술 검색</div></div></a>
     <div class="side-head"><span>검색 기록 <span id="count"></span></span><button class="link quiet" id="clearAll">전체 삭제</button></div>
     <div class="history" id="history"></div>
-    <div class="side-foot"><button class="btn" id="settingsBtn">⚙ 설정</button><span id="keyWarn"></span></div>
+    <div class="side-foot" style="padding-bottom:4px"><button class="conn" id="connBtn" title="CLI 로그인 상태 보기 · 로그인 / 로그아웃"><i class="dot" id="connDot"></i><span id="connText">CLI 연결 확인 중…</span></button></div>
+    <div class="side-foot" style="border-top:0;padding-top:4px"><button class="btn" id="authBtn">🔌 CLI 연결</button><button class="btn" id="settingsBtn">⚙ 설정</button><span id="keyWarn"></span></div>
   </aside>
   <main>
     <div class="topbar"><div class="modes" role="tablist" aria-label="작업 고르기">
-      <button class="mode" role="tab" data-mode="" title="청구항으로 선행기술을 검색합니다">새 검색</button>
-      <button class="mode" role="tab" data-mode="compare" title="검색 없이, 가지고 있는 인용발명 PDF 와 청구항을 구성별로 대비합니다">구성대비</button>
+      <button class="mode" role="tab" data-mode="" title="청구항으로 선행기술을 검색합니다"><span class="ic">🔍</span>검색</button>
+      <button class="mode" role="tab" data-mode="compare" title="가지고 있는 인용발명 PDF 와 청구항을 구성별로 대비합니다"><span class="ic">⇄</span>구성대비</button>
     </div></div>
     <div class="wrap" id="view"></div>
   </main>
@@ -152,7 +175,7 @@ const KEYS = [
   ['OPENALEX_API_KEY', 'OpenAlex API 키', '없어도 동작하지만 공용 한도가 매우 작습니다'],
 ];
 let app = {clis:[], keys:{stored:{}}, settings:{models:{}}, running:''}, list = [], current = null, timer = null, draft = null, lastState = '', view = 'form';
-let formMode = '', settingsBack = null;  // formMode: ''=새 검색, 'compare'=구성대비만 · settingsBack: 설정을 열기 전에 보던 기록
+let formMode = '', settingsBack = null;  // formMode: ''=검색, 'compare'=구성대비만 · settingsBack: 설정을 열기 전에 보던 기록
 
 async function api(path, opt = {}) {
   const r = await fetch(path, {...opt, headers: {'Content-Type':'application/json','X-Patsearch':'1'}});
@@ -163,6 +186,7 @@ async function api(path, opt = {}) {
 const ymd = s => s && s.length === 8 ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : '';
 function badge(state) { const [c, t] = STATE[state] || ['c-idle', state]; return `<span class="chip ${c}">${state === 'running' ? '<span class="spin"></span>' : ''}${t}</span>`; }
 function titleOf(it) { return it.summary?.title || it.snippet || it.id; }
+const isCompare = it => (it.meta || {}).mode === 'compare';  // 구성대비 화면에서 만든 기록 (검색 기록과 따로 다룬다)
 const cliLabel = id => (app.clis.find(c => c.id === id) || {}).label || id || '';
 function settingsLine() {
   const s = app.settings, m = (s.models || {})[s.cli] || {};
@@ -172,6 +196,7 @@ function settingsLine() {
 function renderChrome() {
   if (app.app) { $('#appName').textContent = app.app.name; $('#appTag').textContent = app.app.tagline; document.title = `${app.app.name} — 선행기술 검색`; }
   $('#keyWarn').innerHTML = app.keys.ops ? '' : '<span class="chip c-err" title="설정에서 EPO 키를 입력하세요">EPO 키 없음</span>';
+  renderConn();
 }
 function renderHistory() {
   $('#count').textContent = list.length ? `(${list.length})` : '';
@@ -182,12 +207,12 @@ function renderHistory() {
     const counts = it.has_report ? `<span>상 ${s.high ?? 0} · 중 ${s.mid ?? 0}</span>` : '';
     return `<div class="item ${it.id === current ? 'on' : ''}" data-id="${esc(it.id)}">
       <div class="t">${esc(titleOf(it))}</div>
-      <div class="s">${badge(it.state)}<span>${esc((it.created || '').slice(0, 16))}</span>${counts}</div>
+      <div class="s">${isCompare(it) ? '<span class="chip c-idle">⇄ 구성대비</span>' : '<span class="chip c-idle">🔍 검색</span>'}${isCompare(it) ? '' : badge(it.state)}<span>${esc((it.created || '').slice(0, 16))}</span>${counts}</div>
       <button class="del" title="이 기록 삭제" data-del="${esc(it.id)}">×</button></div>`;
   }).join('');
 }
 
-// --- 입력 화면: 새 검색 / 구성대비 ------------------------------------------------
+// --- 입력 화면: 검색 / 구성대비 ------------------------------------------------
 // 입력하던 청구항을 다른 화면에 다녀와도 잃지 않게 잠시 담아 둔다 (기준일 칸이 없는 구성대비 화면에서는 기준일을 그대로 들고 간다)
 let formBefore = '';
 function stashForm() {
@@ -206,8 +231,8 @@ function renderForm(mode = '') {
   const d = draft || {}; draft = null; formBefore = d.before || '';
   if (mode === 'compare') return renderCompareForm(d);
   $('#view').innerHTML = `
-    <h2>새 검색</h2>
-    <div class="sub">청구항(주로 독립항)을 붙여 넣고 검색을 누르면 구성 분해 → 검색식 생성 → 특허·논문 검색 → 초록 스크리닝 순으로 진행합니다.</div>
+    <h2>검색</h2>
+    <div class="sub">청구항(주로 독립항)을 붙여 넣고 검색을 누르면 구성 분해 → 검색식 생성 → 특허·논문 검색 → 초록 스크리닝 순으로 진행합니다. 진행 중에는 언제든 중지할 수 있습니다.</div>
     <div class="card">
       <label for="claim">청구항</label>
       <textarea id="claim" placeholder="청구항 1.&#10;…">${esc(d.claim || '')}</textarea>
@@ -218,7 +243,7 @@ function renderForm(mode = '') {
         <span class="sub" id="beforeHint"></span>
       </div>
       <div id="formMsg"></div>
-      <div class="row"><button class="btn primary" id="go">검색</button><span class="sub" id="goHint"></span></div>
+      <div class="row" style="margin-top:20px"><button class="btn go" id="go"><span class="ic">🔍</span>검색</button><span class="sub" id="goHint"></span></div>
       <div class="hint" style="margin-top:14px">실행 설정: ${settingsLine()} · <button class="link" id="toSettings">설정 바꾸기</button></div>
     </div>`;
   const sync = () => {
@@ -231,7 +256,7 @@ function renderForm(mode = '') {
   $('#toSettings').onclick = renderSettings;
   if (!app.keys.ops) $('#formMsg').innerHTML = '<div class="msg warn">EPO 키가 없어 특허 검색은 건너뛰고 논문만 검색합니다. <button class="link" id="toSettings2">설정에서 키 입력</button></div>';
   if ($('#toSettings2')) $('#toSettings2').onclick = renderSettings;
-  if (app.running) { $('#go').disabled = true; $('#goHint').textContent = '실행 중인 검색이 끝나면 새로 시작할 수 있습니다.'; }
+  if (app.running) { $('#go').disabled = true; $('#goHint').innerHTML = '실행 중인 검색이 끝나거나 중지하면 새로 시작할 수 있습니다. <button class="link" id="toRunning">실행 중인 검색 보기</button>'; $('#toRunning').onclick = () => select(app.running); }
 }
 async function submit() {
   const useBefore = $('#useBefore').checked, before = $('#before').value;
@@ -273,7 +298,7 @@ function watchClaims(area, out, extra = {}) {
 function renderCompareForm(d) {
   $('#view').innerHTML = `
     <h2>구성대비</h2>
-    <div class="sub">청구항과 인용발명 PDF 를 넣고 시작하면, 검색 없이 청구항을 구성별로 인용발명과 대비합니다. 검색을 마친 기록에서는 그 기록의 "구성대비" 탭을 쓰면 됩니다.</div>
+    <div class="sub">청구항과 인용발명 PDF 를 넣고 시작하면 청구항을 구성별로 인용발명과 대비합니다. 진행 중에는 언제든 중지할 수 있습니다.</div>
     <div class="duo">
       <div class="card">
         <label for="claim">청구항</label>
@@ -291,7 +316,7 @@ function renderCompareForm(d) {
       </div>
     </div>
     <div id="formMsg"></div>
-    <div class="row"><button class="btn primary" id="goCompare">구성대비 시작</button><span class="sub" id="goHint"></span></div>
+    <div class="row" style="margin-top:20px"><button class="btn go" id="goCompare"><span class="ic">⇄</span>구성대비 시작</button><span class="sub" id="goHint"></span></div>
     <div class="hint" style="margin-top:14px">실행 설정: ${settingsLine()} · <button class="link" id="toSettings">설정 바꾸기</button></div>`;
   const listPdfs = () => {
     $('#pdfList').innerHTML = pendingPdfs.map((f, i) => `<div class="file"><span style="flex:1;min-width:0;overflow-wrap:anywhere"><b>${esc(f.name)}</b> <span class="sub">${(f.size / 1048576).toFixed(1)}MB</span></span><button class="link quiet" data-drop="${i}">빼기</button></div>`).join('');
@@ -360,7 +385,7 @@ function leaveSettings() {
   if (id && list.some(x => x.id === id)) select(id); else renderForm(formMode);
 }
 function renderSettings() {
-  if (view !== 'settings') { settingsBack = current; stashForm(); }  // 저장 뒤 다시 그릴 때는 돌아갈 곳을 바꾸지 않는다
+  if (view !== 'settings' && view !== 'auth') { settingsBack = current; stashForm(); }  // 저장 뒤 다시 그릴 때는 돌아갈 곳을 바꾸지 않는다
   view = 'settings'; current = null; stopPolling(); renderHistory(); renderModes();
   const s = JSON.parse(JSON.stringify(app.settings)), stored = app.keys.stored || {};
   $('#view').innerHTML = `
@@ -381,7 +406,9 @@ function renderSettings() {
       <div class="sub">이 PC에 설치되어 로그인된 CLI 를 그대로 불러 씁니다. 별도 API 키가 필요 없습니다.</div>
       <div class="grid">
         <div><label for="cli">LLM CLI</label><select id="cli">${app.clis.map(c => `<option value="${esc(c.id)}" ${c.available ? '' : 'disabled'}>${esc(c.label)}${c.available ? '' : ' (설치 안 됨)'}</option>`).join('')}</select>
-          <div class="hint">${app.clis.map(c => `${esc(c.label)} ${c.available ? '설치됨' : '없음'}`).join(' · ')}</div></div>
+          <div class="hint">${app.clis.map(c => { const a = auth && auth.clis.find(x => x.id === c.id);
+            return `${esc(c.label)} ${!c.available ? '없음' : a ? (a.logged_in === true ? '연결됨' : a.logged_in === false ? '로그인 필요' : '설치됨') : '설치됨'}`; }).join(' · ')}
+            · <button class="link" id="setToAuth">로그인 / 로그아웃</button></div></div>
         ${modelField('model', '분석 모델', '구성 분해·검색식 생성. 호출 수는 적고 품질이 중요합니다.')}
         ${modelField('screenModel', '스크리닝 모델', '초록 판정. 호출 수가 많아 가벼운 모델이 유리합니다.')}
       </div>
@@ -395,6 +422,7 @@ function renderSettings() {
     <div class="row"><button class="btn primary" id="saveSet">저장</button><button class="btn" id="checkSet">저장하고 연결 확인</button><button class="btn" data-leave>닫기</button></div>
     <div class="card" id="checkCard" style="display:none"><h3>연결 확인</h3><div class="results" id="checkOut"></div></div>`;
   $('#view').querySelectorAll('[data-leave]').forEach(b => b.onclick = leaveSettings);
+  $('#setToAuth').onclick = renderAuth;
   $('#cli').value = s.cli;
   let shown = s.cli;
   const load = () => { const m = s.models[shown] || {}; fillModels('model', shown, m.model || ''); fillModels('screenModel', shown, m.screen_model || ''); };
@@ -429,20 +457,91 @@ function renderSettings() {
   });
 }
 
+// --- CLI 연결: 설치·로그인 상태, 로그인 / 로그아웃 ------------------------------------------
+let auth = null, authBusy = false;  // auth: 마지막으로 받은 /api/auth 결과
+function authChip(c) {
+  if (!c.installed) return '<span class="chip c-idle">설치 안 됨</span>';
+  if (c.logged_in === true) return '<span class="chip c-ok">● 연결됨</span>';
+  if (c.logged_in === false) return '<span class="chip c-err">로그인 필요</span>';
+  return '<span class="chip c-warn">확인 불가</span>';
+}
+function renderConn() {
+  const cur = auth && auth.clis.find(c => c.id === app.settings.cli);
+  const dot = $('#connDot'), text = $('#connText');
+  if (!cur) { dot.className = 'dot'; text.textContent = `${cliLabel(app.settings.cli) || 'CLI'} · 연결 확인 중…`; return; }
+  const ok = cur.installed && cur.logged_in === true;
+  dot.className = 'dot ' + (ok ? 'ok' : cur.installed && cur.logged_in == null ? 'warn' : 'err');
+  text.textContent = `${cur.label} · ${!cur.installed ? '설치 안 됨' : cur.logged_in === true ? '연결됨' : cur.logged_in === false ? '로그인 필요' : '확인 불가'}`;
+}
+async function loadAuth() {
+  try { auth = await api('/api/auth'); } catch { auth = null; }
+  renderConn();
+  if (view === 'auth') drawAuth();
+}
+function renderAuth() {
+  if (view !== 'auth' && view !== 'settings') { settingsBack = current; stashForm(); }
+  view = 'auth'; current = null; stopPolling(); renderHistory(); renderModes();
+  $('#view').innerHTML = `
+    <div class="titlebar"><div><h2>🔌 CLI 연결</h2>
+      <div class="sub">검색과 구성대비는 이 PC에 설치된 LLM CLI 의 로그인 계정으로 동작합니다. 여기서 연결 상태를 보고 로그인·로그아웃할 수 있습니다.</div></div>
+      <div class="row" style="margin-top:0"><button class="btn" id="authRefresh">↻ 상태 새로고침</button><button class="btn" data-leave>← 돌아가기</button></div></div>
+    <div id="authMsg"></div>
+    <div class="card" id="authList"><div class="sub"><span class="spin"></span>CLI 마다 상태를 확인하는 중입니다 (몇 초 걸립니다)…</div></div>
+    <div class="hint" style="margin-top:12px">로그인은 새 창(콘솔)에서 진행됩니다. 브라우저에서 로그인을 마친 뒤 그 창을 닫고 "상태 새로고침"을 누르세요. 사용할 CLI 는 <button class="link" id="authToSettings">설정</button>에서 고릅니다.</div>`;
+  $('#view').querySelectorAll('[data-leave]').forEach(b => b.onclick = leaveSettings);
+  $('#authToSettings').onclick = renderSettings;
+  $('#authRefresh').onclick = async () => { $('#authRefresh').disabled = true; $('#authList').innerHTML = '<div class="sub"><span class="spin"></span>상태를 확인하는 중…</div>'; await loadAuth(); if ($('#authRefresh')) $('#authRefresh').disabled = false; };
+  if (auth) drawAuth();
+  loadAuth();
+}
+function drawAuth() {
+  const box = $('#authList'); if (!box || !auth) return;
+  box.innerHTML = auth.clis.map(c => `<div class="cli-card">
+      <div><div class="nm"><i class="dot ${!c.installed ? '' : c.logged_in === true ? 'ok' : c.logged_in === false ? 'err' : 'warn'}"></i>${esc(c.label)}
+        ${authChip(c)}${c.id === auth.current ? '<span class="chip c-run">사용 중</span>' : ''}</div>
+        <div class="sub" style="margin-top:3px">${esc(c.detail || '')}</div>
+        <div class="hint" style="margin-top:2px"><code>${esc(c.exe)}</code>${c.version ? ' · ' + esc(c.version) : ''}</div></div>
+      <div class="acts">${!c.installed ? '' : c.logged_in === true
+        ? `<button class="btn danger" data-auth="logout" data-cli="${esc(c.id)}">로그아웃</button>`
+        : `<button class="btn primary" data-auth="login" data-cli="${esc(c.id)}">로그인</button>`}
+        ${c.installed && c.logged_in === true ? `<button class="btn" data-auth="login" data-cli="${esc(c.id)}" title="다른 계정으로 다시 로그인">다시 로그인</button>` : ''}</div>
+    </div>`).join('');
+  box.querySelectorAll('[data-auth]').forEach(b => b.onclick = () => authAction(b.dataset.cli, b.dataset.auth, b));
+}
+async function authAction(id, action, btn) {
+  const label = cliLabel(id);
+  if (action === 'logout' && !confirm(`${label} 에서 로그아웃할까요?\n\n이 CLI 를 쓰는 검색·구성대비는 다시 로그인할 때까지 실행되지 않습니다.`)) return;
+  if (authBusy) return; authBusy = true; btn.disabled = true;
+  const say = (html, cls) => { if ($('#authMsg')) $('#authMsg').innerHTML = `<div class="msg ${cls}">${html}</div>`; };
+  try {
+    const r = await api(`/api/auth/${id}/${action}`, {method: 'POST', body: '{}'});
+    if (r.opened) say(`${esc(label)} ${action === 'login' ? '로그인' : '로그아웃'} 창을 열었습니다. 그 창에서 마친 뒤 닫고 <b>상태 새로고침</b>을 누르세요.`, 'warn');
+    else say(`${esc(label)} 에서 로그아웃했습니다.`, 'ok');
+    if (auth) auth.clis = auth.clis.map(c => c.id === id ? r.status : c);
+    renderConn(); drawAuth();
+  } catch (e) { say(esc(e.message), 'err'); btn.disabled = false; }
+  authBusy = false;
+}
+
 // --- 검색 기록 상세 --------------------------------------------------------------
 function stepsHtml(it) {
   return STEPS.map((s, i) => `<div class="step ${i < it.progress ? 'done' : (it.state === 'running' && i === it.progress ? 'now' : '')}"><b>${i + 1}단계</b>${s}</div>`).join('');
 }
 function actionsHtml(it) {
-  const b = [`<button class="btn ${it.has_report ? 'primary' : ''}" data-act="compare" title="인용발명 PDF 를 넣어 이 청구항과 구성별로 대비합니다">⇄ 구성대비</button>`];
-  if (it.state === 'running') b.push(it.can_stop ? '<button class="btn danger" data-act="stop">중지</button>' : '<span class="sub">터미널에서 실행 중인 검색입니다</span>');
+  if (isCompare(it)) return '<button class="btn danger" data-act="delete">삭제</button>';
+  const b = [];
+  if (it.state === 'running') { if (!it.can_stop) b.push('<span class="sub">터미널에서 실행 중인 검색입니다</span>'); }
   else {
-    if (!it.has_report) b.push(`<button class="btn ${it.state === 'idle' ? '' : 'primary'}" data-act="resume" ${app.running ? 'disabled' : ''}>${it.state === 'idle' ? '이 청구항으로 검색 실행' : '이어서 실행'}</button>`);
+    if (!it.has_report) b.push(`<button class="btn primary" data-act="resume" ${app.running ? 'disabled' : ''}>이어서 실행</button>`);
     if (it.has_report) b.push(`<a class="btn" href="/runs/${esc(it.id)}/report.html" target="_blank" rel="noopener">리포트 새 탭으로</a>`);
-    b.push('<button class="btn" data-act="again">같은 청구항으로 새 검색</button>');
+    b.push('<button class="btn" data-act="again">같은 청구항으로 다시 검색</button>');
     b.push('<button class="btn danger" data-act="delete">삭제</button>');
   }
   return b.join('');
+}
+// 실행 중일 때 눈에 띄게 보이는 중지 막대
+function runbarHtml(text, act) {
+  return `<div class="runbar"><span class="spin"></span><span class="grow">${text}</span><button class="btn stop" data-act="${act}">■ 중지</button></div>`;
 }
 function metaLine(it) {
   const m = it.meta || {}, parts = [esc(it.created || '')];
@@ -453,29 +552,32 @@ function metaLine(it) {
 function renderDetail(it) {
   view = 'detail'; lastState = it.state; renderModes();
   const running = it.state === 'running';
+  // 검색 기록은 검색 결과만, 구성대비 기록은 구성대비만 보여 준다
+  if (isCompare(it)) {
+    $('#view').innerHTML = `
+      <div class="titlebar"><div><h2>⇄ ${esc(titleOf(it))}</h2><div class="sub"><span class="chip c-idle">구성대비</span> ${esc(it.created || '')}</div></div>
+        <div class="row" style="margin-top:0" id="dActions">${actionsHtml(it)}</div></div>
+      <div class="card"><details><summary>청구항</summary><div class="claim">${esc(it.claim)}</div></details></div>
+      <div id="tabBody" style="margin-top:16px"></div>`;
+    $('#dActions').onclick = onAction;
+    return loadCompare(it.id);
+  }
   $('#view').innerHTML = `
     <div class="titlebar"><div><h2>${esc(titleOf(it))}</h2><div class="sub">${badge(it.state)} ${metaLine(it)}</div></div>
       <div class="row" style="margin-top:0" id="dActions">${actionsHtml(it)}</div></div>
+    ${running && it.can_stop ? runbarHtml('검색 중입니다. 중지하면 지금까지 받은 결과는 남고, 나중에 이어서 실행할 수 있습니다.', 'stop') : ''}
     ${it.message && it.state !== 'done' ? `<div class="msg ${it.state === 'error' ? 'err' : 'warn'}">${esc(it.message)}</div>` : ''}
-    ${it.state === 'idle' ? '' : `<div class="steps" id="dSteps">${stepsHtml(it)}</div>
-    <div class="card"><details ${running || !it.has_report ? 'open' : ''}><summary>진행 기록</summary><pre class="log" id="dLog"></pre></details></div>`}
+    <div class="steps" id="dSteps">${stepsHtml(it)}</div>
+    <div class="card"><details ${running || !it.has_report ? 'open' : ''}><summary>진행 기록</summary><pre class="log" id="dLog"></pre></details></div>
     <div class="card"><details ${it.has_report ? '' : 'open'}><summary>청구항</summary><div class="claim">${esc(it.claim)}</div></details></div>
-    <div class="tabs">${it.has_report ? '<button class="tab" data-tab="report">검색 리포트</button>' : ''}<button class="tab" data-tab="compare">구성대비</button></div>
-    <div id="tabBody"></div>`;
+    ${it.has_report ? `<div class="tabs"><button class="tab on">검색 리포트</button></div><iframe title="검색 리포트" src="/runs/${esc(it.id)}/report.html"></iframe>` : ''}`;
   setLog(it.log, true);
   $('#dActions').onclick = onAction;
-  const show = tab => {
-    stopCompare();
-    $('#view').querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x.dataset.tab === tab));
-    if (tab === 'report') $('#tabBody').innerHTML = `<iframe title="검색 리포트" src="/runs/${esc(it.id)}/report.html"></iframe>`;
-    else loadCompare(it.id);
-  };
-  $('#view').querySelectorAll('.tab').forEach(t => t.onclick = () => show(t.dataset.tab));
-  show(it.has_report && !openCompare ? 'report' : 'compare'); openCompare = false;
+  const stopBtn = $('#view .runbar [data-act]'); if (stopBtn) stopBtn.onclick = onAction;
 }
 
-// --- 구성대비 탭 ---------------------------------------------------------------
-let ctimer = null, openCompare = false;
+// --- 구성대비 ---------------------------------------------------------------
+let ctimer = null;
 function stopCompare() { if (ctimer) { clearInterval(ctimer); ctimer = null; } }
 async function loadCompare(id) {
   let c; try { c = await api(`/api/runs/${id}/compare`); } catch (e) { $('#tabBody').innerHTML = `<div class="soon"><div class="msg err">${esc(e.message)}</div></div>`; return; }
@@ -547,10 +649,12 @@ function renderCompare(id, c) {
     <div class="sub">텍스트가 들어 있는 PDF 를 넣으세요. 특허는 단락 번호([0019])로, 논문은 쪽 번호로 발췌 위치를 적습니다.</div>
     ${alone ? '<div class="msg warn" style="margin-top:10px">독립항 없이 종속항만 넣은 기록입니다. 종속항마다 더한 구성만 인용발명에서 찾고, 인용하는 항의 대비 기록이 없으므로 결론은 쓰지 않습니다. 독립항까지 대비하려면 위 "구성대비" 탭에서 독립항을 맨 앞에 함께 넣어 새로 시작하세요.</div>' : ''}
     <div style="margin-top:8px">${docsHtml}</div>
-    <div class="row"><input type="file" id="cmpFile" accept="application/pdf,.pdf" multiple style="max-width:320px" ${running ? 'disabled' : ''}>
-      <button class="btn primary" id="cmpStart" ${running || !c.docs.length ? 'disabled' : ''}>${r ? '구성대비 다시 실행' : '구성대비 시작'}</button>
+    <div class="row"><input type="file" id="cmpFile" accept="application/pdf,.pdf" multiple style="max-width:320px" ${running ? 'disabled' : ''}></div>
+    <div class="row" style="margin-top:18px">
+      ${running ? '' : `<button class="btn go" id="cmpStart" ${!c.docs.length ? 'disabled' : ''}><span class="ic">⇄</span>${r ? '구성대비 다시 실행' : '구성대비 시작'}</button>`}
       <span class="sub">구성 나누기는 분석 모델, 구성별 판정은 스크리닝 모델을 씁니다 (설정에서 변경).${c.dependents && !alone ? ' 넣어 둔 종속항도 이어서 함께 대비합니다.' : ''}</span></div>
-    <div id="cmpMsg">${c.state === 'error' ? `<div class="msg err">${esc(c.message)}</div>` : ''}${compareNotice ? `<div class="msg err">${esc(compareNotice)}</div>` : ''}</div>
+    ${running ? runbarHtml('구성대비 중입니다. 중지하면 지금 하던 대비는 버려지고, 다시 실행하면 처음부터 대비합니다.', 'cstop') : ''}
+    <div id="cmpMsg">${c.state === 'error' ? `<div class="msg err">${esc(c.message)}</div>` : ''}${c.state === 'stopped' || c.state === 'interrupted' ? `<div class="msg warn">${esc(c.message || '구성대비가 중단되었습니다. 다시 실행하세요.')}</div>` : ''}${compareNotice ? `<div class="msg err">${esc(compareNotice)}</div>` : ''}</div>
     ${running || (c.log && !r) ? `<pre class="log" id="cmpLog">${esc(c.log)}</pre>` : ''}
     ${resultHtml}</div>`;
   compareNotice = '';  // 한 번만 보여 준다
@@ -568,7 +672,13 @@ function renderCompare(id, c) {
   $('#tabBody').querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => {
     try { renderCompare(id, await api(`/api/runs/${id}/compare/docs/${b.dataset.rm}`, {method: 'DELETE'})); } catch (e) { fail(e); }
   });
-  $('#cmpStart').onclick = async () => { try { await api(`/api/runs/${id}/compare/start`, {method: 'POST', body: '{}'}); loadCompare(id); } catch (e) { fail(e); } };
+  if ($('#cmpStart')) $('#cmpStart').onclick = async () => { $('#cmpStart').disabled = true; try { await api(`/api/runs/${id}/compare/start`, {method: 'POST', body: '{}'}); loadCompare(id); } catch (e) { fail(e); $('#cmpStart').disabled = false; } };
+  const cstop = $('#tabBody [data-act="cstop"]');
+  if (cstop) cstop.onclick = async () => {
+    if (!confirm('실행 중인 구성대비를 중지할까요?\n다시 실행하면 처음부터 대비합니다.')) return;
+    cstop.disabled = true; stopCompare();
+    try { renderCompare(id, await api(`/api/runs/${id}/compare/stop`, {method: 'POST', body: '{}'})); } catch (e) { fail(e); loadCompare(id); }
+  };
   if (r) {
     const compose = async body => { try { renderCompare(id, await api(`/api/runs/${id}/compare/compose`, {method: 'POST', body: JSON.stringify(body)})); } catch (e) { fail(e); } };
     if (!alone) {  // 종속항만 대비한 기록에는 바꿀 청구항 1 순서도, 청구항 1 양식도 없다
@@ -604,14 +714,13 @@ function setLog(text, force) {
   if (atEnd) el.scrollTop = el.scrollHeight;
 }
 async function onAction(e) {
-  const act = e.target.dataset?.act; if (!act || !current) return;
-  if (act === 'compare') {  // 구성대비 탭을 열고 그 자리로 내려간다. 이미 열려 있으면 입력하던 내용을 지우지 않게 다시 그리지 않는다
-    const tab = $('#view .tab[data-tab="compare"]'); if (!tab) return;
-    if (!tab.classList.contains('on')) tab.click();
-    return tab.scrollIntoView({behavior: 'smooth', block: 'start'});
-  }
+  const act = e.target.closest?.('[data-act]')?.dataset.act; if (!act || !current) return;
   try {
-    if (act === 'stop') { if (!confirm('실행 중인 검색을 중지할까요?\n지금까지 받은 결과는 남고, 나중에 이어서 실행할 수 있습니다.')) return; await api(`/api/runs/${current}/stop`, {method: 'POST'}); }
+    if (act === 'stop') {
+      if (!confirm('실행 중인 검색을 중지할까요?\n지금까지 받은 결과는 남고, 나중에 이어서 실행할 수 있습니다.')) return;
+      e.target.closest('button').disabled = true;
+      await api(`/api/runs/${current}/stop`, {method: 'POST'});
+    }
     if (act === 'resume') await api(`/api/runs/${current}/resume`, {method: 'POST'});
     if (act === 'delete') return removeRun(current);
     if (act === 'again') { const d = await api(`/api/runs/${current}`); draft = {claim: d.claim, before: ymd((d.meta || {}).before)}; return renderForm(); }
@@ -641,14 +750,16 @@ async function refresh() {
   renderChrome(); renderHistory();
 }
 
-// 위쪽 탭(새 검색 / 구성대비). 두 입력 화면을 오갈 때는 쓰던 청구항을 가져가고, 지금 탭을 다시 눌러도 쓰던 내용은 그대로 둔다.
+// 위쪽 탭(검색 / 구성대비). 두 입력 화면을 오갈 때는 쓰던 청구항을 가져가고, 지금 탭을 다시 눌러도 쓰던 내용은 그대로 둔다.
 const openForm = mode => {
   if (view === 'form' && formMode === mode) { $('main').scrollTop = 0; return; }
   stashForm(); renderForm(mode);
 };
 document.querySelectorAll('.mode').forEach(b => b.onclick = () => openForm(b.dataset.mode));
-$('#home').onclick = e => { e.preventDefault(); openForm(''); };  // 이름·엠블럼 → 첫 화면(새 검색)
+$('#home').onclick = e => { e.preventDefault(); openForm(''); };  // 이름·엠블럼 → 첫 화면(검색)
 $('#settingsBtn').onclick = () => renderSettings();
+$('#authBtn').onclick = () => renderAuth();
+$('#connBtn').onclick = () => renderAuth();
 $('#history').onclick = e => {
   const del = e.target.closest('[data-del]'); if (del) { e.stopPropagation(); return removeRun(del.dataset.del); }
   const item = e.target.closest('.item'); if (item) { stashForm(); select(item.dataset.id); }
@@ -660,7 +771,8 @@ $('#clearAll').onclick = async () => {
   if (!confirm(`검색 기록 ${n}건을 모두 삭제할까요?\n\n결과 파일이 모두 지워지며 되돌릴 수 없습니다.` + (n < list.length ? '\n(실행 중인 검색은 남습니다)' : ''))) return;
   try { await api('/api/runs', {method: 'DELETE'}); current = null; await refresh(); renderForm(); } catch (err) { alert(err.message); }
 };
-setInterval(async () => { if (!timer && view !== 'settings') { try { await refresh(); } catch {} } }, 8000);
+setInterval(async () => { if (!timer && view !== 'settings' && view !== 'auth') { try { await refresh(); } catch {} } }, 8000);
+setInterval(() => { if (view !== 'auth' && !document.hidden) loadAuth(); }, 5 * 60 * 1000);  // 로그인 상태는 가끔만 다시 확인한다
 
 // --- 이스터 에그: 엠블럼을 5번 연달아 누르거나, 입력칸 밖에서 eureka 라고 치면 ---
 const LINES = [
@@ -687,6 +799,6 @@ document.addEventListener('keydown', e => {
   typed = (typed + e.key.toLowerCase()).slice(-6); if (typed === 'eureka') { typed = ''; eureka(); }
 });
 
-refresh().then(() => app.running ? select(app.running) : renderForm()).catch(e => { $('#view').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
+refresh().then(() => { loadAuth(); return app.running ? select(app.running) : renderForm(); }).catch(e => { $('#view').innerHTML = `<div class="msg err">${esc(e.message)}</div>`; });
 </script>
 </body></html>
