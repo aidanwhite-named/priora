@@ -1,0 +1,6 @@
+.env
+settings.json
+.cache/
+runs/
+compare_out/
+__pycache__/
