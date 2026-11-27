@@ -168,6 +168,26 @@ def read_dependents(text: str, base_no: int | None) -> tuple:
     return deps, notes + more
 
 
+def merge_dependents(old: str, new: str, base_no: int | None) -> tuple:
+    """넣어 둔 종속항 글(old)에 새로 넣은 글(new)을 더한다. (합친 글, 알림 목록, 새로 넣은 항 번호들)
+
+    종속항을 나눠서 넣을 때 쓴다(청구항 2~9 를 대비한 뒤 10~20 을 더 넣는 경우). 번호가 같은 항은 새 글로 바꾼다.
+    새 글에 항 번호가 없으면 넣어 둔 마지막 항에 이어서 번호를 붙인다.
+    """
+    notes = []
+    kept = parse_claims(old, base_no=_guess_base(old) if base_no is None else base_no) if old.strip() else []
+    last = max((c["no"] for c in kept), default=None)
+    start = last if last is not None else _guess_base(new) if base_no is None else base_no
+    added = parse_claims(new, base_no=start, notes=notes)
+    by_no = {c["no"]: c for c in kept}
+    replaced = [c["no"] for c in added if c["no"] in by_no and by_no[c["no"]]["text"] != c["text"]]
+    if replaced:
+        notes.append("청구항 " + ", ".join(map(str, replaced)) + ": 이미 넣어 둔 항이라 새 글로 바꿨습니다")
+    by_no.update({c["no"]: c for c in added})
+    text = "\n".join(f'[청구항 {no}] {by_no[no]["text"]}' for no in sorted(by_no))
+    return text, notes, [c["no"] for c in added]
+
+
 ALONE_NOTE = ("독립항이 없어 종속항만 대비합니다. 항마다 더한 구성만 인용발명에서 찾고, 인용하는 항의 대비 기록이 없으므로 "
               "결론은 쓰지 않습니다. 독립항을 맨 앞에 함께 넣으면 \"상기 …\"를 그 글에 비추어 읽고 결론까지 씁니다")
 

@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import claims, llm, runs
-from .config import Cache, load_env, load_settings
+from .config import ROOT, Cache, load_env, load_settings
 
 EXCERPT_LEN = 120  # 원문 발췌 글자 수. 넘으면 … 로 자른다
 MAX_REFS_CLAIM1 = 3  # 청구항 1 에 결합할 수 있는 인용발명 수 상한
@@ -36,6 +36,11 @@ CIRCLED = "①②③④⑤⑥⑦⑧⑨"
 VERDICT_KO = {"same": "실질적 동일", "partial": "일부 차이", "none": "차이"}
 SENT_PROMPT_LEN = 420
 MAX_SENTENCES = 45
+# 문헌 언어. 검색어는 언어마다 따로 받는다: 영문 terms, 국문 terms_ko, 중문 terms_zh, 일문 terms_ja.
+LANG_KO = {"ko": "국문", "en": "영문", "zh": "중문", "ja": "일문"}
+LANG_EN = {"zh": "Chinese", "ja": "Japanese"}  # 문헌에 있을 때만 그 언어의 검색어를 더 받는다
+TERM_KEYS = {"ko": "terms_ko", "zh": "terms_zh", "ja": "terms_ja"}
+_CJK = r"぀-ヿ㐀-鿿"  # 가나와 한자. 띄어쓰기 없이 쓰는 글자
 
 
 class CompareError(Exception):
@@ -47,7 +52,8 @@ _ABBR = re.compile(r"(?:\b(?:FIGS?|Nos?|Ser|e\.g|i\.e|etc|al|Inc|Corp|Ltd|vs|cf|
 
 
 def split_sentences(text: str) -> list:
-    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z가-힣\"“(\[])", text)
+    # 중문·일문은 띄어쓰기 없이 "。" 로 끝나고, 단계 나열은 "；" 로 끊는다
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z가-힣\"“(\[])|(?<=[。！？；])\s*", text)
     out = []
     for part in parts:
         if out and _ABBR.search(out[-1]):
@@ -57,16 +63,42 @@ def split_sentences(text: str) -> list:
     return [s.strip() for s in out if s.strip()]
 
 
+_PAGE_NO = re.compile(r"^[-–—\s]*\d{1,4}[-–—\s]*$|^(?:page\s*)?\d{1,4}\s*(?:/|of)\s*\d{1,4}\s*(?:页|頁|쪽)?$", re.I)
+
+
+def _in_rows(lines: list) -> list:
+    """줄 [(x0, y0, x1, y1, 글)] 을 읽는 순서로 편다: 위에서 아래로, 같은 높이에 놓인 조각은 왼쪽부터.
+
+    여백에 따로 찍힌 단락 번호("[0009]")나 줄 끝에서 떨어져 나온 낱말은 PDF 안에서 그 줄 뒤에 적혀 있기도 하다.
+    높이로 묶어 왼쪽부터 읽어야 단락 번호가 그 단락의 첫 줄 앞에 온다.
+    """
+    rows = []
+    for line in sorted(lines, key=lambda l: (l[1] + l[3]) / 2):
+        if rows:
+            ref, mid = rows[-1][0], (line[1] + line[3]) / 2
+            if ref[1] <= mid <= ref[3] or line[1] <= (ref[1] + ref[3]) / 2 <= line[3]:
+                rows[-1].append(line)
+                continue
+        rows.append([line])
+    return [line[4] for row in rows for line in sorted(row, key=lambda l: l[0])]
+
+
 def _page_lines(page) -> list:
-    """한 쪽의 줄들을 읽는 순서로 돌려준다. 2단 편집은 왼쪽 단 → 오른쪽 단, 쪽 머리말은 버린다."""
+    """한 쪽의 줄들을 읽는 순서로 돌려준다. 2단 편집은 왼쪽 단 → 오른쪽 단, 쪽 머리말과 쪽 번호는 버린다."""
     width, height = page.rect.width, page.rect.height
     full, left, right = [], [], []
-    for block in page.get_text("blocks"):
-        x0, y0, x1, y1, text = block[:5]
-        if len(block) > 6 and block[6] != 0:
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
             continue  # 그림 블록
-        lines = [" ".join(line.split()) for line in text.split("\n") if line.strip()]
-        if not lines or (y1 < 0.065 * height and sum(len(line) for line in lines) < 120):
+        x0, y0, x1, y1 = block["bbox"]
+        lines = []
+        for line in block["lines"]:
+            text = " ".join("".join(span["text"] for span in line["spans"]).split())
+            lx0, ly0, lx1, ly1 = line["bbox"]
+            if not text or ((ly0 > 0.85 * height or ly1 < 0.08 * height) and _PAGE_NO.match(text)):
+                continue  # 쪽 번호("- 3 -", "14", "3/22 页")
+            lines.append((lx0, ly0, lx1, ly1, text))
+        if not lines or (y1 < 0.065 * height and sum(len(line[4]) for line in lines) < 120):
             continue
         if (x1 - x0) > 0.6 * width:
             full.append((y0, lines))
@@ -74,13 +106,19 @@ def _page_lines(page) -> list:
             left.append((y0, lines))
         else:
             right.append((y0, lines))
-    if len(left) < 2 or len(right) < 2:
-        ordered = sorted(full + left + right, key=lambda b: b[0])
-    else:
-        first = min(y for y, _ in left + right)
-        ordered = (sorted((b for b in full if b[0] <= first), key=lambda b: b[0]) + sorted(left, key=lambda b: b[0])
-                   + sorted(right, key=lambda b: b[0]) + sorted((b for b in full if b[0] > first), key=lambda b: b[0]))
-    return [line for _, lines in ordered for line in lines]
+
+    def size(group):
+        return sum(len(line[4]) for _, lines in group for line in lines)
+
+    def flat(group):
+        return _in_rows([line for _, lines in group for line in lines])
+
+    # 2단: 좁은 블록이 양쪽에 있고, 글의 대부분이 거기에 있을 때만. 1단 문헌도 단락의 짧은 끝줄은 좁은 블록이다
+    if len(left) < 2 or len(right) < 2 or size(left) + size(right) < size(full):
+        return flat(full + left + right)
+    first = min(y for y, _ in left + right)
+    return (flat([b for b in full if b[0] <= first]) + flat(left) + flat(right)
+            + flat([b for b in full if b[0] > first]))
 
 
 def _join_lines(lines: list, vocab: dict) -> str:
@@ -89,6 +127,9 @@ def _join_lines(lines: list, vocab: dict) -> str:
     for line in lines:
         if not out:
             out = line
+            continue
+        if re.match(f"[{_CJK}，。、；：）】》]", line) and re.search(f"[{_CJK}，、（【《]$", out):
+            out += line  # 중문·일문은 낱말 사이를 띄지 않는다
             continue
         a = re.search(r"([A-Za-z]+)(-?)$", out)
         b = re.match(r"[a-z]+", line)
@@ -144,9 +185,11 @@ def load_document(path: Path, doc_id: str = "", name: str = "") -> dict:
                 page = i
         return page + 1
 
-    hangul = len(re.findall(r"[가-힣]", text))
-    lang = "ko" if hangul > 0.15 * len(text) else "en"
-    marks = list(re.finditer(r"\[\s*(\d{4})\s*\]", text))
+    hangul, kana, han = (len(re.findall(p, text)) for p in (r"[가-힣]", r"[぀-ヿ]", r"[㐀-鿿]"))
+    lang = ("ko" if hangul > 0.15 * len(text) else "ja" if kana > 0.03 * len(text) and kana + han > 0.15 * len(text)
+            else "zh" if han > 0.15 * len(text) else "en")
+    # 단락 번호는 네 자리가 보통이지만 100 번째부터 다섯 자리로 적는 문헌이 있다([0099] 다음이 [00100])
+    marks = list(re.finditer(r"\[\s*(\d{4,5})\s*\]", text))
     paragraphs = []
     if len(marks) >= 8:  # 단락 번호가 있는 특허 문헌
         kind = "patent"
@@ -154,7 +197,7 @@ def load_document(path: Path, doc_id: str = "", name: str = "") -> dict:
             end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
             body = text[m.end():end].strip()
             if i + 1 == len(marks):  # 마지막 단락 뒤에 붙은 청구범위는 잘라낸다
-                body = re.split(r"What is claimed|We claim|I claim|What is claimed is|청구범위|【청구항", body)[0].strip()
+                body = re.split(r"What is claimed|We claim|I claim|What is claimed is|청구범위|【청구항|权利要求书|【請求項", body)[0].strip()
             sentences = split_sentences(body)
             if sentences:
                 paragraphs.append({"loc": m.group(1), "page": page_of(m.start()), "sentences": sentences})
@@ -215,14 +258,22 @@ A feature is one technical requirement that a prior-art document must show.
   ("…를 생성하는 단계 - 상기 …에는 …가 없음" is two requirements: generating it, and the condition).
 - Never make a feature out of a modifier: wording that refers back to an earlier element ("상기 …에 기초하여"),
   or that only describes the data ("객체를 묘사하는", "이전에 압축된"). Keep modifiers inside the feature they belong to.
+  A step that is based only on things the claim has already introduced stays ONE feature:
+  "상기 기준값에 기초하여 출력을 설정하는 단계" is one feature. Where the step happens (a processor, a memory)
+  is never a feature of its own either.
+- The one exception: a "based on / using / according to" clause that names something appearing in the claim for
+  the first time there (a new input, parameter or condition, written without "상기"), as in "상기 제1 값 및 장치의
+  설정 매개변수에 기초하여 기준값을 결정하는 단계". Using that new input is a separate technical requirement,
+  because a document can perform the step without it. Then make two features: the step itself
+  ("기준값을 결정하는 단계") and the use of the new input ("장치의 설정 매개변수에 기초하여 기준값을 결정하는 것").
 For each feature:
 - "phrase": a self-contained Korean noun phrase in the claim's own wording that names the requirement
   (keep the claim's ending, for example "~하는 단계"). It must make sense when read alone.
 - "terms": 8-12 English words or stems an English document would use for it (put * after a stem).
-- "terms_ko": 4-8 Korean words a Korean document would use for it.
+- "terms_ko": 4-8 Korean words a Korean document would use for it.{more_terms}
 
 Return JSON only:
-{{"elements": [{{"id": "A", "features": [{{"phrase": "...", "terms": ["..."], "terms_ko": ["..."]}}]}}]}}
+{{"elements": [{{"id": "A", "features": [{{"phrase": "...", "terms": ["..."], "terms_ko": ["..."]{more_json}}}]}}]}}
 """
 
 JUDGE_PROMPT = """\
@@ -266,12 +317,12 @@ ELEMENT ({eid}): {etext}
 FEATURE: {phrase}
 
 Return JSON only:
-{{"problem": "...", "means": ["...", "..."], "terms": ["..."], "terms_ko": ["..."]}}
+{{"problem": "...", "means": ["...", "..."], "terms": ["..."], "terms_ko": ["..."]{more_json}}}
 - "problem": one plain English sentence: what goes wrong when this feature is missing.
 - "means": 3-5 short English phrases: known kinds of techniques that give the result the feature requires.
 - "terms": 15-20 English words or stems (put * after a stem) that a document would use when it describes that
   problem or those techniques. Cover both: words for the failure, and words for the techniques.
-- "terms_ko": 6-10 Korean words for the same.
+- "terms_ko": 6-10 Korean words for the same.{more_terms}
 """
 
 # 2차 판정(가벼운 모델, 문헌 × 빈 특징마다 1회)
@@ -362,13 +413,16 @@ For each feature:
   (b) when the verb is passive or describes a state, with its modifier form ending in "는" or "된", so that
       "구성" can follow it directly: "오차 항은 제외되는", "덮개는 본체와 연결된", "출력에 잡음이 없는".
   Leave out the closing category word of the claim ("…, 방법.", "…, 장치.").
+  Keep every limitation of that requirement in the phrase, also one that the claim attaches after it
+  ("…를 수신하는 단계로서, 상기 …는 …를 나타내는" is "…를 나타내는 …를 수신"). Never leave a limitation
+  to "meaning" alone.
 - "meaning": one Korean sentence that states the same requirement so that it can be understood without reading
   the other claims: replace each back-reference with what it refers to there.
 - "terms": 8-12 English words or stems an English document would use for it (put * after a stem).
-- "terms_ko": 4-8 Korean words a Korean document would use for it.
+- "terms_ko": 4-8 Korean words a Korean document would use for it.{more_terms}
 
 Return JSON only:
-{{"features": [{{"phrase": "...", "meaning": "...", "terms": ["..."], "terms_ko": ["..."]}}]}}
+{{"features": [{{"phrase": "...", "meaning": "...", "terms": ["..."], "terms_ko": ["..."]{more_json}}}]}}
 """
 
 # 종속항 판정(가벼운 모델, 문헌 × 종속항마다 1회)
@@ -384,7 +438,7 @@ DEPENDENT CLAIM {no}: {text}
 
 FEATURES this claim adds:
 {features}
-
+{known}
 PRIOR-ART SENTENCES:
 {sentences}
 
@@ -393,23 +447,66 @@ For each feature, decide whether one of the sentences discloses it.
   words or as a specific example of it. A document that names the required item as an example or option of
   its own corresponding part discloses the feature. Judge the substance, the way a patent examiner reads
   "substantially the same".
+- Every limitation of the feature counts: what a value is determined from or based on, the condition under
+  which a step is performed, and what the data must be. A sentence that only shows that the resulting item
+  exists does not disclose how it is determined: "a threshold is stored and applied" does not disclose
+  "determining the threshold based on the measured temperature". Placing, showing or using an object is not
+  determining (measuring, computing) its position.
+- A word that is the same but means something else does not count: the "model" of a device as its make or
+  product name is not a mathematical model of the device.
+- If you could explain the match only with a reservation ("…을 명시하지는 않지만", "직접 기재하지는 않으나"),
+  the feature is not disclosed: answer null. Do not pick the closest sentence for the sake of having one.
+- Judge the same way every time: when two features ask for the same thing, they get the same answer.
 - Not disclosed: the sentences are about something else, or only share words with the feature.
 Choose a sentence that describes what the system or method is or does. Avoid figure captions, table rows and
 reference-list entries.
 
 Return JSON only, one entry per feature:
-{{"features": [{{"n": 1, "sentence": 12, "translation_ko": "...", "why_ko": "..."}}, {{"n": 2, "sentence": null}}]}}
+{{"features": [{{"n": 1, "sentence": 12, "missing_ko": "", "translation_ko": "...", "why_ko": "..."}}, {{"n": 2, "sentence": null}}]}}
 - "sentence": the number of the one sentence that best discloses the feature, or null if none does.
+- "missing_ko": check the chosen sentence against the feature part by part, then name in a few Korean words any
+  part the sentence does not show (a limitation, what a value is determined from, a condition). Leave it empty
+  only when the sentence shows the whole feature. Words that only point back to the claims above ("상기 …")
+  need no support and are never missing. A feature with something missing is treated as not disclosed.
 - "translation_ko": {translation_rule}
 - "why_ko": one Korean clause that begins with "인용발명은" and ends with "므로". Say what the document states
   in that sentence and why that amounts to the feature. "므로" must be its last word, with nothing after it.
+  It must not say that the document lacks or does not state something.
   Example: "인용발명은 제어부의 예로 마이크로컨트롤러를 들어 제어부가 프로세서를 포함할 수 있음을 기재하므로"
 """
 
 
-def claim_features(claim: str, elements: list, model: str, cache) -> list:
+def extra_langs(docs: list) -> list:
+    """국문·영문이 아닌 문헌의 언어들. 이 언어의 검색어를 LLM 에게 더 받아야 그 문헌에서 후보 문장을 고를 수 있다."""
+    return sorted({d.get("lang") for d in docs} & set(LANG_EN))
+
+
+def _more_terms(langs) -> dict:
+    """프롬프트에 끼울 말. 중문·일문 문헌이 없으면 빈 글이라 프롬프트가 달라지지 않는다."""
+    return {
+        "more_terms": "".join(f'\n- "{TERM_KEYS[l]}": 6-10 {LANG_EN[l]} words a {LANG_EN[l]} patent document would use for it.'
+                              for l in langs),
+        "more_json": "".join(f', "{TERM_KEYS[l]}": ["..."]' for l in langs),
+    }
+
+
+def _terms(row: dict, langs) -> dict:
+    keys = ["terms", "terms_ko"] + [TERM_KEYS[l] for l in langs]
+    return {k: [str(t) for t in row.get(k) or []] for k in keys}
+
+
+def warn_no_terms(docs: list, holders: list, say=print) -> None:
+    """문헌 언어의 검색어가 하나도 없으면 후보 문장을 고르지 못해 전부 "대응 없음"이 된다. 조용히 넘어가지 않게 알린다."""
+    for doc in docs:
+        key = TERM_KEYS.get(doc.get("lang"), "terms")
+        if holders and not any(f.get(key) for h in holders for f in h.get("features") or []):
+            say(f'  ! {doc["name"]}: {LANG_KO.get(doc.get("lang"), "이 언어")} 검색어가 없어 이 문헌은 대비하지 못합니다. '
+                f"구성대비를 처음부터 다시 실행하세요")
+
+
+def claim_features(claim: str, elements: list, model: str, cache, langs=()) -> list:
     listing = "\n".join(f'({e["id"]}) {e["text"]}' for e in elements)
-    answer = llm.ask_json(FEATURES_PROMPT.format(claim=claim, elements=listing), model=model, cache=cache)
+    answer = llm.ask_json(FEATURES_PROMPT.format(claim=claim, elements=listing, **_more_terms(langs)), model=model, cache=cache)
     by_id = {str(x.get("id", "")).upper(): x for x in (answer.get("elements") or []) if isinstance(x, dict)}
     out = []
     for e in elements:
@@ -417,8 +514,7 @@ def claim_features(claim: str, elements: list, model: str, cache) -> list:
         for f in (by_id.get(e["id"], {}).get("features") or [])[:3]:
             phrase = str(f.get("phrase") or "").strip()
             if phrase:
-                feats.append({"phrase": phrase, "terms": [str(t) for t in f.get("terms") or []],
-                              "terms_ko": [str(t) for t in f.get("terms_ko") or []]})
+                feats.append({"phrase": phrase, **_terms(f, langs)})
         if not feats:  # LLM 이 빼먹은 구성은 구성 전체를 하나의 특징으로 본다
             feats = [{"phrase": e["text"], "terms": [], "terms_ko": []}]
         out.append({"id": e["id"], "text": e["text"], "features": feats})
@@ -430,7 +526,7 @@ def _term_regex(term: str):
     term = term.strip().lower()
     if not term:
         return None
-    if re.search(r"[가-힣]", term):
+    if re.search(f"[가-힣{_CJK}]", term):
         return re.compile(re.escape(term.rstrip("*")))
     words = [re.escape(w.rstrip("*")) + (r"\w*" if w.endswith("*") else "") for w in term.split()]
     return re.compile(r"\b" + r"[\s\-]+".join(words) + (r"" if term.endswith("*") else r"(?:s|es)?\b"))
@@ -445,9 +541,9 @@ def _scores(doc: dict, terms: list) -> list:
     return [sum(min(c[k], 3) * weights[k] for k in range(len(regexes))) for c in counts]
 
 
-def _usable(sentence: str) -> bool:
+def _usable(sentence: str, shortest: int = 25) -> bool:
     """발췌로 쓸 만한 문장인가. 그림 설명·표·참고문헌 줄은 거른다."""
-    if not 25 <= len(sentence) <= 600:
+    if not shortest <= len(sentence) <= 600:
         return False
     if re.match(r"^\W*\[?\d+\]?\W+[A-Z]\.\s", sentence) or re.search(r"\bTABLE\b|\bet al\.,", sentence):
         return False
@@ -459,9 +555,10 @@ def _usable(sentence: str) -> bool:
 
 def candidate_sentences(doc: dict, element: dict) -> list:
     """구성의 특징별로 관련 단락을 고르고, 그 안의 문장을 [{para, sent, text}] 로 돌려준다."""
-    key = "terms_ko" if doc["lang"] == "ko" else "terms"
+    key = TERM_KEYS.get(doc["lang"], "terms")
+    shortest = 10 if doc["lang"] in LANG_EN else 25  # 중문·일문은 같은 내용이 훨씬 짧다
     sentences = [
-        (pi, si, s) for pi, p in enumerate(doc["paragraphs"]) for si, s in enumerate(p["sentences"]) if _usable(s)
+        (pi, si, s) for pi, p in enumerate(doc["paragraphs"]) for si, s in enumerate(p["sentences"]) if _usable(s, shortest)
     ]
     lowered = [s.lower() for _, _, s in sentences]
     quota = max(8, MAX_SENTENCES // max(1, len(element["features"])))
@@ -498,8 +595,17 @@ def judge(doc: dict, element: dict, model: str, cache) -> list:
     return _read_judgment(llm.ask_json(prompt, model=model, cache=cache), cands, len(element["features"]))
 
 
-def _read_judgment(answer, cands: list, count: int) -> list:
-    """판정 응답을 특징별 [{disclosed, para, sent, translation_ko, why_ko}] 로 바꾼다. 문장 번호가 틀리면 미개시."""
+# 대응 이유에 "…을 명시하지는 않지만" 같은 단서가 붙으면 그대로 개시된 것이 아니다
+_HEDGE = re.compile(r"(?:명시|기재|개시|언급|설명|제시)(?:하고 있지|하지|되어 있지|되지)(?:는|도)?\s*(?:않|아니|못)"
+                    r"|(?:나타나|드러나)지(?:는|도)?\s*않|에 그[친치]")
+
+
+def _read_judgment(answer, cands: list, count: int, strict: bool = False) -> list:
+    """판정 응답을 특징별 [{disclosed, para, sent, translation_ko, why_ko}] 로 바꾼다. 문장 번호가 틀리면 미개시.
+
+    strict: 대응 이유가 스스로 "명시하지 않는다"고 적은 판정은 개시로 보지 않는다(양식에 "…명시하지 않으므로
+    …대응됩니다"처럼 앞뒤가 안 맞는 글이 나가지 않게 한다).
+    """
     rows = answer.get("features") if isinstance(answer, dict) else answer
     by_n = {}
     for r in rows or []:
@@ -516,6 +622,11 @@ def _read_judgment(answer, cands: list, count: int) -> list:
             idx = -1
         if not 0 <= idx < len(cands):
             out.append({"disclosed": False})
+            continue
+        missing = str(r.get("missing_ko") or "").strip()
+        if strict and (missing or _HEDGE.search(str(r.get("why_ko") or ""))):
+            # 가장 가까운 문장은 찾았지만 구성의 일부가 거기에 없다. 무엇이 없는지를 남겨 둔다
+            out.append({"disclosed": False, "hedged": (missing or str(r.get("why_ko") or "").strip())[:300]})
             continue
         out.append({
             "disclosed": True, "para": cands[idx]["para"], "sent": cands[idx]["sent"],
@@ -551,16 +662,16 @@ def _translation_rule(doc: dict) -> str:
             else "that sentence translated into Korean, faithfully and completely, as one sentence.")
 
 
-def feature_hints(claim: str, element: dict, index: int, model: str, cache) -> dict:
+def feature_hints(claim: str, element: dict, index: int, model: str, cache, langs=()) -> dict:
     """빈 특징 하나에 대해 '무엇을 찾을지'(문제, 수단, 검색어)를 받는다."""
     answer = llm.ask_json(HINTS_PROMPT.format(claim=claim, eid=element["id"], etext=element["text"],
-                                              phrase=element["features"][index]["phrase"]), model=model, cache=cache)
+                                              phrase=element["features"][index]["phrase"], **_more_terms(langs)),
+                          model=model, cache=cache)
     answer = answer if isinstance(answer, dict) else {}
     return {
         "problem": str(answer.get("problem") or "").strip(),
         "means": [str(m).strip() for m in answer.get("means") or [] if str(m).strip()][:5],
-        "terms": [str(t) for t in answer.get("terms") or []],
-        "terms_ko": [str(t) for t in answer.get("terms_ko") or []],
+        **_terms(answer, langs),
     }
 
 
@@ -569,7 +680,7 @@ def suggest(doc: dict, element: dict, index: int, hints: dict, model: str, cache
 
     돌려주는 값: {problem: {para, sent, translation_ko} | None, means: {…}, why_ko, source}
     """
-    cands = candidate_sentences(doc, {"features": [{"terms": hints["terms"], "terms_ko": hints["terms_ko"]}]})
+    cands = candidate_sentences(doc, {"features": [hints]})
     if not cands:
         return None
     prompt = SUGGEST_PROMPT.format(
@@ -606,7 +717,7 @@ def suggest_gaps(claim: str, docs: list, elements: list, judgments: dict, gaps: 
         element = by_element[gap["element"]]
         key = f'{gap["element"]}.{gap["feature"]}'
         try:
-            hints[key] = feature_hints(claim, element, gap["feature"], hint_model, cache)
+            hints[key] = feature_hints(claim, element, gap["feature"], hint_model, cache, langs=extra_langs(docs))
         except llm.LLMError as e:
             say(f"  ! ({key}) 찾을 내용 정리 실패: {e}")
             continue
@@ -738,9 +849,14 @@ def verdict(features: list) -> str:
 
 
 def doc_score(judgment: dict) -> tuple:
+    """(실질적 동일인 구성 수, 개시된 특징 수, 일부라도 대응되는 구성 수). 큰 문헌이 주인용발명 후보다.
+
+    앞의 둘이 같으면, 구성 하나가 통째로 없는 문헌보다 구성마다 일부라도 대응되는 문헌을 앞에 둔다.
+    """
     same = sum(1 for f in judgment.values() if verdict(f) == "same")
     feats = sum(1 for fs in judgment.values() for f in fs if f.get("disclosed"))
-    return (same, feats)
+    touched = sum(1 for f in judgment.values() if verdict(f) != "none")
+    return (same, feats, touched)
 
 
 def _suggestion(feature: dict) -> dict | None:
@@ -827,6 +943,14 @@ def quote(doc: dict, feature: dict) -> str:
     return f'"{translation}" ({where}; "{_excerpt(source)}")'
 
 
+def _basis(doc: dict, source: dict) -> str:
+    """도출 근거의 인용: 문제와 수단을 적은 문장. 둘이 같은 문장이면 한 번만 싣는다."""
+    problem, means = source.get("problem"), source["means"]
+    if problem and (problem.get("para"), problem.get("sent")) != (means.get("para"), means.get("sent")):
+        return f'{quote(doc, problem)}는 문제와 {quote(doc, means)}는 해결 수단이 기재되어 있고'
+    return f'{quote(doc, means)}는 구성이 기재되어 있고'
+
+
 def _row_feature(features: list) -> dict | None:
     """구성 한 줄에 실을 발췌: 가장 많은 특징이 가리킨 문장."""
     disclosed = [f for f in features if f.get("disclosed")]
@@ -838,17 +962,30 @@ def _row_feature(features: list) -> dict | None:
     return max(disclosed, key=lambda f: count[(f["para"], f["sent"])])
 
 
+def _join_ids(ids: list) -> str:
+    """구성 표지 묶기: (F) / (F) 및 (G) / (B), (C) 및 (D)"""
+    labels = [f"({i})" for i in ids]
+    return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " 및 " + labels[-1]
+
+
 def render(claim_no: int, elements: list, docs: list, judgments: dict, plan: dict) -> str:
     by_id = {d["id"]: d for d in docs}
     order = plan["order"]
     number = {doc_id: i + 1 for i, doc_id in enumerate(order)}
     primary = order[0]
     lines = [f"[인용발명{CIRCLED[0]}]", "[구성요소]"]
+    groups = []  # 이웃한 구성이 판정도 같고 같은 문장을 가리키면 "(F) 및 (G)"처럼 한 번만 적는다
     for e in elements:
         features = judgments[primary][e["id"]]
-        lines.append(f'({e["id"]}) {VERDICT_KO[verdict(features)]}')
         row = _row_feature(features)
-        lines.append(quote(by_id[primary], row) if row else "대응되는 기재를 찾지 못했습니다")
+        key = (verdict(features), (row["para"], row["sent"]) if row else None)
+        if groups and groups[-1]["key"] == key:
+            groups[-1]["ids"].append(e["id"])
+        else:
+            groups.append({"key": key, "ids": [e["id"]], "row": row})
+    for group in groups:
+        lines.append(f'{_join_ids(group["ids"])} {VERDICT_KO[group["key"][0]]}')
+        lines.append(quote(by_id[primary], group["row"]) if group["row"] else "대응되는 기재를 찾지 못했습니다")
         lines.append("")
     lines.append("[차이점]")
     open_gaps = []
@@ -867,10 +1004,7 @@ def render(claim_no: int, elements: list, docs: list, judgments: dict, plan: dic
         why = f"{why} " if why else ""
         if gap.get("how") == "suggested":  # 그대로 적혀 있지는 않지만 문제·수단의 기재로부터 쉽게 도출
             doc = by_id[gap["by"]]
-            if source.get("problem"):
-                found = f'{quote(doc, source["problem"])}는 문제와 {quote(doc, source["means"])}는 해결 수단이 기재되어 있고'
-            else:
-                found = f'{quote(doc, source["means"])}는 구성이 기재되어 있고'
+            found = _basis(doc, source)
             where = "" if n == 1 else f"인용발명 {n}에는 "
             apply = "이로부터" if n == 1 else "인용발명 1에 이를 적용하여"
             lines.append(
@@ -942,10 +1076,15 @@ def feature_ref(phrase: str) -> str:
     """양식에서 구성을 가리키는 말: "…를 포함"하는 구성 / "…는 제외"되는 구성."""
     p = re.sub(r"(하는|되는)\s*(?:구성|것|단계)$", r"\1", phrase.strip().rstrip(" .,;"))
     for ending, tail in (("하는", "하는"), ("하고", "하는"), ("하며", "하는"), ("한다", "하는"), ("합니다", "하는"),
-                         ("되는", "되는"), ("되고", "되는"), ("되며", "되는"), ("된다", "되는"), ("됩니다", "되는")):
+                         ("되는", "되는"), ("되고", "되는"), ("되며", "되는"), ("된다", "되는"), ("됩니다", "되는"),
+                         ("됨", "되는")):
         if p.endswith(ending) and len(p) > len(ending):
             return f'"{p[:-len(ending)].rstrip()}"{tail} 구성'
     if p.endswith(("는", "된")):  # "…가 없는", "…를 갖는", "…와 연결된"
+        return f'"{p}" 구성'
+    # "마커는 광학 추적 장치인" 처럼 "…이다"로 맺는 구성. "…를 확인"처럼 하다 동사의 어간이 "인"으로 끝나는 말은 아니다
+    if p.endswith("인") and not p.endswith(("확인", "승인", "할인", "날인", "견인", "유인", "시인", "부인", "오인", "공인",
+                                           "로그인", "디자인", "사인", "체크인")):
         return f'"{p}" 구성'
     return f'"{p}"하는 구성'
 
@@ -968,10 +1107,10 @@ def dependent_contexts(claim: str, base_no: int | None, deps: list) -> dict:
     return {d["no"]: "\n".join(line(d, n) for n in d["ancestors"]) for d in deps}
 
 
-def dependent_features(dep: dict, context: str, model: str, cache) -> list:
+def dependent_features(dep: dict, context: str, model: str, cache, langs=()) -> list:
     """종속항이 더한 구성 [{phrase, meaning, terms, terms_ko}]."""
     prompt = DEP_FEATURES_PROMPT.format(context=context, no=dep["no"], refs=claims.ref_label(dep["refs"]),
-                                        text=dep["text"], limit=MAX_DEP_FEATURES)
+                                        text=dep["text"], limit=MAX_DEP_FEATURES, **_more_terms(langs))
     answer = llm.ask_json(prompt, model=model, cache=cache)
     rows = answer.get("features") if isinstance(answer, dict) else answer
     feats = []
@@ -980,17 +1119,15 @@ def dependent_features(dep: dict, context: str, model: str, cache) -> list:
             continue
         phrase = _clean_phrase(str(f.get("phrase") or ""))
         if phrase:
-            feats.append({"phrase": phrase, "meaning": " ".join(str(f.get("meaning") or "").split()),
-                          "terms": [str(t) for t in f.get("terms") or []],
-                          "terms_ko": [str(t) for t in f.get("terms_ko") or []]})
+            feats.append({"phrase": phrase, "meaning": " ".join(str(f.get("meaning") or "").split()), **_terms(f, langs)})
     return feats
 
 
-def split_dependents(deps: list, contexts: dict, model: str, cache, say=print, workers: int = 4) -> None:
+def split_dependents(deps: list, contexts: dict, model: str, cache, say=print, workers: int = 4, langs=()) -> None:
     """종속항마다 dep["features"] 를 채운다."""
     def run(dep):
         try:
-            return dependent_features(dep, contexts[dep["no"]], model, cache)
+            return dependent_features(dep, contexts[dep["no"]], model, cache, langs=langs)
         except llm.LLMError as e:
             say(f'  ! 청구항 {dep["no"]} 구성 나누기 실패: {e}')
             return []
@@ -1003,28 +1140,48 @@ def split_dependents(deps: list, contexts: dict, model: str, cache, say=print, w
                 say(f'  ({dep["no"]}-{i + 1}) {f["phrase"]}' + (f'  ← {f["meaning"]}' if f["meaning"] else ""))
 
 
-def judge_dependent(doc: dict, dep: dict, context: str, model: str, cache) -> list:
+def judge_dependent(doc: dict, dep: dict, context: str, model: str, cache, lacking: list | None = None) -> list:
+    """lacking: 인용하는 청구항을 대비할 때 이 문헌에 없다고 판정된 특징들. 종속항 판정이 그것과 어긋나지 않게 알려 준다."""
     cands = candidate_sentences(doc, dep)
     if not cands:
         return [{"disclosed": False} for _ in dep["features"]]
+    known = ""
+    if lacking:
+        known = ("\nALREADY ESTABLISHED when the claims above were compared with this document - it does NOT disclose:\n"
+                 + "\n".join(f"- {phrase}" for phrase in lacking)
+                 + "\nStay consistent with that: when a feature of the dependent claim repeats the very limitation listed "
+                   "here (the same input, the same condition), this document does not disclose that feature either, unless a "
+                   "sentence below states it outright. Judge every other feature on its own; a part that the document calls "
+                   "by another name still counts.\n")
     prompt = DEP_JUDGE_PROMPT.format(
         context=context, no=dep["no"], text=dep["text"],
         features="\n".join(f'{i + 1}. {f["phrase"]}' + (f'\n   meaning: {f["meaning"]}' if f.get("meaning") else "")
                            for i, f in enumerate(dep["features"])),
+        known=known,
         sentences="\n".join(f'[{i + 1}] {c["text"][:SENT_PROMPT_LEN]}' for i, c in enumerate(cands)),
         translation_rule=_translation_rule(doc),
     )
-    return _read_judgment(llm.ask_json(prompt, model=model, cache=cache), cands, len(dep["features"]))
+    return _read_judgment(llm.ask_json(prompt, model=model, cache=cache), cands, len(dep["features"]), strict=True)
 
 
-def judge_dependents(docs: list, deps: list, contexts: dict, model: str, cache, say=print, workers: int = 4) -> dict:
+def lacking_features(elements: list, judgments: dict) -> dict:
+    """문헌마다, 청구항 1 대비에서 그 문헌에 없다고 판정된 특징 이름들. {doc_id: [phrase]}"""
+    out = {}
+    for doc_id, by_element in (judgments or {}).items():
+        out[doc_id] = [f["phrase"] for e in elements
+                       for f, j in zip(e["features"], by_element.get(e["id"]) or []) if not j.get("disclosed")]
+    return out
+
+
+def judge_dependents(docs: list, deps: list, contexts: dict, model: str, cache, say=print, workers: int = 4,
+                     lacking: dict | None = None) -> dict:
     """dep_judgments[doc_id][종속항 id] = 구성별 판정 목록"""
     tasks = [(d, dep) for dep in deps for d in docs]
 
     def run(task):
         doc, dep = task
         try:
-            return judge_dependent(doc, dep, contexts[dep["no"]], model, cache)
+            return judge_dependent(doc, dep, contexts[dep["no"]], model, cache, lacking=(lacking or {}).get(doc["id"]))
         except llm.LLMError as e:
             say(f'  ! {doc["name"]} (청구항 {dep["no"]}) 판정 실패: {e}')
             return [{"disclosed": False, "error": str(e)[:200]} for _ in dep["features"]]
@@ -1044,8 +1201,10 @@ def assign_dependent(judged: dict, base: set, numbering: list, ranking: list,
 
     judged: {doc_id: 이 종속항의 구성별 판정}, base: 인용하는 항들에 이미 쓴 인용발명,
     numbering: 지금까지 번호가 붙은 인용발명(번호순), ranking: 청구항 1 대응이 많은 순.
-    인용하는 항의 인용발명(번호순)에서 먼저 찾고, 남은 구성은 새 인용발명 max_new 건까지로 메운다.
+    인용하는 항의 인용발명에서 먼저 찾고, 남은 구성은 새 인용발명 max_new 건까지로 메운다.
     그대로 개시한 문헌을 먼저 쓰고, 그래도 남은 구성에만 도출 근거를 쓴다.
+    한 구성을 여러 인용발명이 개시하면 이 항의 구성을 가장 많이 개시한 인용발명을 쓰고, 같으면 번호가 앞선 것을 쓴다
+    (한 항의 구성들은 한 절차의 단계인 경우가 많아, 한 문헌에서 이어서 대응시키는 쪽이 앞뒤가 맞는다).
     돌려주는 값: ([구성마다 {doc, how} 또는 None], [새로 더한 인용발명])
     """
     count = len(next(iter(judged.values())))
@@ -1067,11 +1226,16 @@ def assign_dependent(judged: dict, base: set, numbering: list, ranking: list,
         open_ = [i for i in range(count) if by[i] is None and covers(doc_id, i, how)]
         return (len(open_), sum(weight(doc_id, i) for i in open_) if how == "suggested" else 0)
 
+    def disclosed_count(doc_id):
+        return sum(1 for i in range(count) if covers(doc_id, i, "disclosed"))
+
     for how in ("disclosed", "suggested"):
         for i in range(count):
             hits = [d for d in allowed if by[i] is None and covers(d, i, how)]
-            if hits:  # 개시는 번호가 앞선 인용발명, 도출 근거는 가장 강한 근거
-                by[i] = {"doc": hits[0] if how == "disclosed" else max(hits, key=lambda d: weight(d, i)), "how": how}
+            if hits:  # 개시는 이 항의 구성을 가장 많이 개시한 인용발명(같으면 번호가 앞선 것), 도출 근거는 가장 강한 근거
+                best = (max(hits, key=lambda d: (disclosed_count(d), -allowed.index(d))) if how == "disclosed"
+                        else max(hits, key=lambda d: weight(d, i)))
+                by[i] = {"doc": best, "how": how}
         while len(new) < max_new and any(b is None for b in by):
             best = max((d for d in others if d not in allowed), key=lambda d: gain(d, how), default=None)
             if best is None or not gain(best, how)[0]:
@@ -1120,20 +1284,32 @@ def plan_dependents(base_no: int, plan: dict, deps: list, dep_judgments: dict) -
 
 
 def suggest_dependents(claim: str, base_no: int, docs: list, deps: list, dep_judgments: dict, plan: dict, model: str,
-                       hint_model: str, cache, say=print) -> dict:
-    """어느 인용발명으로도 메우지 못한 종속항 구성에 대해 도출 근거(문제·수단을 적은 문장)를 찾는다."""
+                       hint_model: str, cache, say=print, skip=()) -> dict:
+    """어느 인용발명으로도 메우지 못한 종속항 구성에 대해 도출 근거(문제·수단을 적은 문장)를 찾는다.
+
+    skip: 저장된 판정을 그대로 쓰는 항 번호들. 이미 찾아 본 항이라 다시 찾지 않는다.
+    """
     contexts = dependent_contexts(claim, base_no, deps)
     hints = {}
     for item in plan_dependents(base_no, plan, deps, dep_judgments)["claims"]:
         dep = item["dep"]
         gaps = [{"element": dep["id"], "feature": i} for i, b in enumerate(item["by"]) if b is None]
-        if not gaps:
+        if not gaps or dep["no"] in skip:
             continue
         # 가벼운 모델이 "상기 …"를 몰라도 되도록, 구성 이름 대신 풀어 쓴 뜻을 보여 준다
         probe = {"id": dep["id"], "text": dep["text"],
                  "features": [{**f, "phrase": f.get("meaning") or f["phrase"]} for f in dep["features"]]}
         whole = f'{contexts[dep["no"]]}\n청구항 {dep["no"]}: {dep["text"]}'
         hints.update(suggest_gaps(whole, docs, [probe], dep_judgments, gaps, model, hint_model, cache, say=say))
+        for gap in gaps:  # 대응 이유가 스스로 "…까지는 나타나지 않는다"고 적은 근거는 쓰지 않는다
+            for doc in docs:
+                found = dep_judgments[doc["id"]][dep["id"]][gap["feature"]].get("suggested")
+                if (isinstance(found, dict) and found.get("source") != "manual" and not found.get("rejected")
+                        and _HEDGE.search(found.get("why_ko") or "")):
+                    found["rejected"] = True
+                    found.pop("weight", None)
+                    found["reason_ko"] = "대응 이유가 스스로 단서를 달아(그 구성이 나타나지 않는다고 적음) 근거로 쓰지 않습니다"
+                    say(f'  {doc["name"]} ({dep["id"]}) 제외: {found["reason_ko"]}')
     return hints
 
 
@@ -1143,7 +1319,7 @@ def _why(text: str, number: int) -> str:
     번호를 넣고 조사를 번호 소리에 맞춘다(인용발명 2는, 인용발명 3은). "므로" 뒤에 덧붙은 말은 잘라 내고,
     "므로"가 아예 없으면 문장이 이어지지 않으므로 쓰지 않는다.
     """
-    text = " ".join((text or "").split())
+    text = re.sub(r"^(인용발명\s*\d*\s*)의의(?=\s)", r"\1의", " ".join((text or "").split()))  # LLM 이 가끔 "인용발명의의"로 쓴다
     cut = text.rfind("므로")
     if cut < 0:
         return ""
@@ -1160,33 +1336,46 @@ def render_dependent(item: dict, docs: list, dep_judgments: dict, numbering: lis
     """종속항 하나의 양식.
 
     청구항 2
-    제1항에 있어서 청구항 2의 구성 (2-1)에 대해 인용발명 1에는 "번역" (단락 [0022]; "원문…")는 구성이 기재되어 있고
-    인용발명 1은 …므로 청구항의 "…를 포함"하는 구성에 대응됩니다
+    제1항에 있어서 청구항 2의 구성에 대해 인용발명 1에는 "번역" (단락 [0022]; "원문…")는 구성이 기재되어 있고
+    인용발명 1은 …므로 청구항의 "…를 포함"하는 구성에 대응되고,
+
+    인용발명 2에는 "…" (단락 [0031])는 구성이 기재되어 있고 인용발명 2는 …므로 청구항의 "…"하는 구성에 대응됩니다
+
+    따라서 청구항 2 발명은 …
+
+    구성마다 한 문단이고 문단 사이는 한 줄 띈다. "청구항 2의 구성에 대해"는 첫 문단에만 쓴다.
+    그 항의 마지막 구성만 "…니다"로 맺고, 앞의 구성들은 "…고," "…며,"를 번갈아 쓴다.
     """
     by_id = {d["id"]: d for d in docs}
     dep, no = item["dep"], item["dep"]["no"]
     lines = [f"청구항 {no}"]
+    last = len(dep["features"]) - 1
     for i, (feature, pick) in enumerate(zip(dep["features"], item["by"])):
-        lead = f'{dep["preamble"]} ' if i == 0 and dep["preamble"] else ""
-        head = f"{lead}청구항 {no}의 구성 ({no}-{i + 1})에 대해"
+        lead = f'{dep["preamble"]} ' if dep["preamble"] else ""
+        head = f"{lead}청구항 {no}의 구성에 대해 " if i == 0 else ""
+
+        def end(final: str, a: str, b: str) -> str:  # 맺음말: 마지막 구성 / 앞의 구성(번갈아)
+            return final if i == last else (a if i % 2 == 0 else b)
+
+        if i:
+            lines.append("")
         ref = feature_ref(feature["phrase"])
         if pick is None:
-            lines.append(f"{head} 제출된 인용발명들에서 청구항의 {ref}에 대응되는 기재를 찾지 못했습니다")
+            lines.append(f"{head}제출된 인용발명들에서 청구항의 {ref}에 대응되는 기재를 "
+                         + end("찾지 못했습니다", "찾지 못했고,", "찾지 못했으며,"))
             continue
         n = numbering.index(pick["doc"]) + 1
         doc = by_id[pick["doc"]]
         judged = dep_judgments[pick["doc"]][dep["id"]][i]
         if pick["how"] == "suggested":  # 그대로 적혀 있지는 않지만 문제·수단의 기재로부터 쉽게 도출
             source = judged["suggested"]
-            if source.get("problem"):
-                found = f'{quote(doc, source["problem"])}는 문제와 {quote(doc, source["means"])}는 해결 수단이 기재되어 있고'
-            else:
-                found = f'{quote(doc, source["means"])}는 구성이 기재되어 있고'
-            lines.append(f"{head} 인용발명들에는 청구항의 {ref}이 명시되어 있지 않으나, 인용발명 {n}에는 {found} "
-                         f'{_why(source.get("why_ko"), n)}통상의 기술자가 이로부터 청구항의 {ref}을 쉽게 도출할 수 있습니다')
+            found = _basis(doc, source)
+            lines.append(f"{head}인용발명들에는 청구항의 {ref}이 명시되어 있지 않으나, 인용발명 {n}에는 {found} "
+                         f'{_why(source.get("why_ko"), n)}통상의 기술자가 이로부터 청구항의 {ref}을 쉽게 도출할 수 '
+                         + end("있습니다", "있고,", "있으며,"))
             continue
-        lines.append(f"{head} 인용발명 {n}에는 {quote(doc, judged)}는 구성이 기재되어 있고 "
-                     f'{_why(judged.get("why_ko"), n)}청구항의 {ref}에 대응됩니다')
+        lines.append(f"{head}인용발명 {n}에는 {quote(doc, judged)}는 구성이 기재되어 있고 "
+                     f'{_why(judged.get("why_ko"), n)}청구항의 {ref}에 ' + end("대응됩니다", "대응되고,", "대응되며,"))
     lines.append("")
     if item["missing"]:
         lines.append(f"청구항 {no} 발명의 일부 구성은 제출된 인용발명들에서 대응되는 기재를 찾지 못했으므로, 결론은 작성하지 않았습니다")
@@ -1236,6 +1425,60 @@ def load_dependents(out_dir: Path) -> tuple:
         return None, None
 
 
+def kept_dependents(out_dir: Path, docs: list, deps: list, contexts: dict, claim: str, base_no: int | None) -> tuple:
+    """종속항을 나눠서 더 넣을 때: 이미 대비해 둔 항 가운데 글과 맥락이 그대로인 항은 저장된 판정을 그대로 쓴다.
+
+    그런 항의 dep["features"] 를 저장된 구성으로 채우고 (그 항 번호들, 저장된 판정, 저장된 도출 근거 단서)를 돌려준다.
+    문헌이 바뀌었거나 저장된 판정이 없으면 아무 항도 고르지 않는다(모두 새로 판정).
+    """
+    stored, judged = load_dependents(out_dir)
+    if not stored or not judged or any(d["id"] not in judged for d in docs):
+        return set(), {}, {}
+    try:
+        hints = json.loads((out_dir / "dep_hints.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        hints = {}
+    old = {d["no"]: d for d in stored.get("claims") or []}
+    old_contexts = dependent_contexts(claim, base_no, list(old.values()))
+    kept = set()
+    for dep in deps:
+        prev = old.get(dep["no"])
+        if (prev and prev.get("features") and prev["text"] == dep["text"] and old_contexts.get(dep["no"]) == contexts[dep["no"]]
+                and all(len(judged[d["id"]].get(dep["id"]) or []) == len(prev["features"]) for d in docs)):
+            dep["features"] = prev["features"]
+            kept.add(dep["no"])
+    return kept, judged, hints
+
+
+def _judge_fresh(out_dir: Path, claim: str, base_no: int | None, docs: list, deps: list, contexts: dict, plan_of, model: str,
+                 hint_model: str, cache, say, keep: bool, lacking: dict | None, steps: tuple) -> tuple:
+    """종속항의 구성 나누기 → 판정 → 도출 근거 찾기. (dep_judgments, hints)
+
+    keep: 이미 대비해 둔 항 가운데 글이 그대로인 항은 저장된 판정을 쓰고 새로 넣었거나 고친 항만 LLM 에 보낸다.
+    plan_of: dep_judgments 를 받아 출발점(청구항 1 의 인용발명)을 돌려주는 함수. steps: 단계 이름 셋.
+    """
+    kept, old_judged, old_hints = kept_dependents(out_dir, docs, deps, contexts, claim, base_no) if keep else (set(), {}, {})
+    fresh = [d for d in deps if d["no"] not in kept]
+    if kept:
+        say("  이미 대비한 청구항 " + ", ".join(str(d["no"]) for d in deps if d["no"] in kept)
+            + " 은 저장된 판정을 그대로 씁니다" + ("" if fresh else ". 새로 대비할 항이 없습니다"))
+    say(steps[0])
+    split_dependents(fresh, contexts, hint_model, cache, say=say, langs=extra_langs(docs))
+    warn_no_terms(docs, fresh, say)
+    say(steps[1])
+    judged = judge_dependents(docs, fresh, contexts, model, cache, say=say, lacking=lacking)
+    dep_judgments = {d["id"]: {dep["id"]: (old_judged if dep["no"] in kept else judged)[d["id"]][dep["id"]] for dep in deps}
+                     for d in docs}
+    say(steps[2])
+    hints = {k: v for k, v in old_hints.items() if any(k.split(".")[0] == d["id"] for d in deps if d["no"] in kept)}
+    found = suggest_dependents(claim, base_no, docs, deps, dep_judgments, plan_of(dep_judgments), model, hint_model, cache,
+                               say=say, skip=kept)
+    if not found:
+        say("  해당 없음")
+    hints.update(found)
+    return dep_judgments, hints
+
+
 def alone_plan(docs: list, dep_judgments: dict) -> dict:
     """독립항 없이 종속항만 대비할 때의 출발점. 청구항 1 의 인용발명이 없고, 문헌은 종속항 구성을 많이 개시한 순이다."""
     def score(doc_id):
@@ -1246,15 +1489,43 @@ def alone_plan(docs: list, dep_judgments: dict) -> dict:
 
 def build_alone(dependents: dict, docs: list, dep_judgments: dict) -> dict:
     """종속항만 대비한 결과. 청구항 1 쪽 항목은 비워 둔다. LLM 을 부르지 않는다."""
+    unify_translations(dep_judgments)
     plan = alone_plan(docs, dep_judgments or {})
     result = {"alone": True, "claim_no": None, "order": [], "ranking": plan["ranking"], "gaps": [], "matrix": [], "text": ""}
     result.update(build_dependents(None, plan, dependents, docs, dep_judgments or {}))
+    result["legend"] = legend(result["numbering"], docs)
     return result
+
+
+def unify_translations(*judgment_sets) -> None:
+    """같은 문장을 여러 구성이 가리키면 번역을 하나로 맞춘다(먼저 나온 번역).
+
+    번역은 판정할 때마다 LLM 이 따로 하므로, 그대로 두면 같은 문장이 항마다 다른 말("내부 보정"/"내재 보정")로 실린다.
+    """
+    first = {}
+
+    def refs():
+        for judged in judgment_sets:
+            for doc_id, by in (judged or {}).items():
+                for features in by.values():
+                    for feature in features:
+                        found = feature.get("suggested") if isinstance(feature.get("suggested"), dict) else {}
+                        for ref in (feature, found.get("problem"), found.get("means")):
+                            if isinstance(ref, dict) and "para" in ref and "sent" in ref:
+                                yield (doc_id, ref["para"], ref["sent"]), ref
+
+    for key, ref in refs():
+        if ref.get("translation_ko"):
+            first.setdefault(key, ref["translation_ko"])
+    for key, ref in refs():
+        if key in first:
+            ref["translation_ko"] = first[key]
 
 
 def build_result(claim: str, elements: list, docs: list, judgments: dict, primary: str = "", extra=None,
                  dependents: dict | None = None, dep_judgments: dict | None = None) -> dict:
     claim_no = _claim_no(claim)
+    unify_translations(judgments, dep_judgments)
     plan = compose(elements, judgments, [d["id"] for d in docs], primary=primary, extra=extra)
     result = {
         "claim_no": claim_no, "order": plan["order"], "ranking": plan["ranking"], "gaps": plan["gaps"],
@@ -1263,6 +1534,7 @@ def build_result(claim: str, elements: list, docs: list, judgments: dict, primar
     }
     if dependents and dependents.get("claims"):
         result.update(build_dependents(claim_no, plan, dependents, docs, dep_judgments or {}))
+    result["legend"] = legend(result.get("numbering") or result["order"], docs)
     return result
 
 
@@ -1272,17 +1544,18 @@ def read_docs(pdfs: list, say=print) -> list:
     for doc_id, name, path in pdfs:
         doc = load_document(Path(path), doc_id=doc_id, name=name)
         unit = "단락" if doc["kind"] == "patent" else "묶음"
-        say(f'  {doc["name"]}: {doc["pages"]}쪽, {len(doc["paragraphs"])}개 {unit}, {"국문" if doc["lang"] == "ko" else "영문"}')
+        say(f'  {doc["name"]}: {doc["pages"]}쪽, {len(doc["paragraphs"])}개 {unit}, {LANG_KO.get(doc["lang"], doc["lang"])}')
         docs.append(doc)
     return docs
 
 
 def run_alone(text: str, pdfs: list, out_dir: Path, model: str, cache, say=print, split_model: str | None = None,
-              reuse_docs: bool = False) -> dict:
+              reuse_docs: bool = False, keep: bool = False) -> dict:
     """독립항 없이 종속항만 대비한다.
 
     인용하는 항의 글도 대비 기록도 없으므로, 항마다 더한 구성만 뽑아 인용발명 어디에 있는지 찾는다. 결론은 쓰지 않는다.
     reuse_docs: 문헌은 그대로 두고 종속항만 바꿔 다시 돌릴 때, PDF 를 다시 읽지 않고 저장해 둔 문헌을 쓴다.
+    keep: 종속항을 나눠서 더 넣을 때. 이미 대비한 항은 저장된 판정을 그대로 쓰고 새 항만 판정한다(reuse_docs 일 때만).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     hint_model = model if split_model is None else split_model
@@ -1310,15 +1583,10 @@ def run_alone(text: str, pdfs: list, out_dir: Path, model: str, cache, say=print
     if not deps:
         raise CompareError("대비할 종속항이 없습니다. " + " / ".join(notes))
     contexts = dependent_contexts("", None, deps)
-    say("[3/5] 종속항이 더한 구성 나누기")
-    split_dependents(deps, contexts, hint_model, cache, say=say)
-    say("[4/5] 구성별 판정 (그대로 개시되어 있는가)")
-    dep_judgments = judge_dependents(docs, deps, contexts, model, cache, say=say)
-    say("[5/5] 메우지 못한 구성의 도출 근거 찾기")
-    hints = suggest_dependents("", None, docs, deps, dep_judgments, alone_plan(docs, dep_judgments), model, hint_model,
-                               cache, say=say)
-    if not hints:
-        say("  해당 없음")
+    dep_judgments, hints = _judge_fresh(
+        out_dir, "", None, docs, deps, contexts, lambda judged: alone_plan(docs, judged), model, hint_model, cache, say,
+        keep and reuse_docs, None,
+        ("[3/5] 종속항이 더한 구성 나누기", "[4/5] 구성별 판정 (그대로 개시되어 있는가)", "[5/5] 메우지 못한 구성의 도출 근거 찾기"))
     dependents = {"alone": True, "base_no": None, "claims": deps, "notes": [claims.ALONE_NOTE] + notes}
     # 청구항 1 쪽 파일은 빈 값으로 둔다. 화면과 양식 다시 만들기가 같은 파일들을 읽는다.
     for name, value in (("docs.json", docs), ("elements.json", []), ("judgments.json", {d["id"]: {} for d in docs}),
@@ -1348,9 +1616,10 @@ def run_compare(claim: str, pdfs: list, out_dir: Path, model: str, cache, say=pr
     docs = read_docs(pdfs, say)
     say("[2/5] 청구항 구성 나누기")
     hint_model = model if split_model is None else split_model
-    elements = claim_features(claim, split_claim(claim), hint_model, cache)
+    elements = claim_features(claim, split_claim(claim), hint_model, cache, langs=extra_langs(docs))
     for e in elements:
         say(f'  ({e["id"]}) ' + " / ".join(f["phrase"] for f in e["features"]))
+    warn_no_terms(docs, elements, say)
     say("[3/5] 구성별 판정 (그대로 개시되어 있는가)")
     judgments = judge_all(docs, elements, model, cache, say=say)
     keep_manual(out_dir, docs, elements, judgments)
@@ -1378,10 +1647,13 @@ def run_compare(claim: str, pdfs: list, out_dir: Path, model: str, cache, say=pr
     return result
 
 
-def run_dependents(claim: str, text: str, out_dir: Path, model: str, cache, say=print, split_model: str | None = None) -> dict:
+def run_dependents(claim: str, text: str, out_dir: Path, model: str, cache, say=print, split_model: str | None = None,
+                   keep: bool = False) -> dict:
     """저장된 청구항 구성대비 결과 위에 종속항을 대비한다. PDF 를 다시 읽지 않는다.
 
     text: "[CLAIM 2]제1항에 있어서, …" 처럼 항 번호를 붙인 종속항들.
+    keep: 종속항을 나눠서 더 넣을 때. 이미 대비한 항 가운데 글이 그대로인 항은 저장된 판정을 그대로 쓰고,
+          새로 넣었거나 고친 항만 판정한다.
     """
     try:
         docs = json.loads((out_dir / "docs.json").read_text(encoding="utf-8"))
@@ -1411,14 +1683,11 @@ def run_dependents(claim: str, text: str, out_dir: Path, model: str, cache, say=
     if not deps:
         raise CompareError("대비할 종속항이 없습니다. " + " / ".join(notes))
     contexts = dependent_contexts(claim, base_no, deps)
-    say("[종속항 2/4] 종속항이 더한 구성 나누기")
-    split_dependents(deps, contexts, hint_model, cache, say=say)
-    say("[종속항 3/4] 구성별 판정 (그대로 개시되어 있는가)")
-    dep_judgments = judge_dependents(docs, deps, contexts, model, cache, say=say)
-    say("[종속항 4/4] 메우지 못한 구성의 도출 근거 찾기")
-    hints = suggest_dependents(claim, base_no, docs, deps, dep_judgments, plan, model, hint_model, cache, say=say)
-    if not hints:
-        say("  해당 없음")
+    dep_judgments, hints = _judge_fresh(
+        out_dir, claim, base_no, docs, deps, contexts, lambda judged: plan, model, hint_model, cache, say, keep,
+        lacking_features(elements, judgments),
+        ("[종속항 2/4] 종속항이 더한 구성 나누기", "[종속항 3/4] 구성별 판정 (그대로 개시되어 있는가)",
+         "[종속항 4/4] 메우지 못한 구성의 도출 근거 찾기"))
     dependents = {"base_no": base_no, "claims": deps, "notes": notes}
     (out_dir / "dependents.txt").write_text(text.strip() + "\n", encoding="utf-8")
     (out_dir / "dependents.json").write_text(json.dumps(dependents, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1442,9 +1711,19 @@ def saved_order(out_dir: Path) -> tuple:
         return "", None
 
 
+def legend(numbering: list, docs: list) -> list:
+    """양식 맨 위에 붙이는 대응표의 줄들("인용발명 1: CN105118055A"). 양식에 쓰인 문헌만, 번호순.
+
+    번호는 넣은 순서가 아니라 양식에 쓰인 순서로 붙으므로(주인용이 1, 종속항만 대비하면 먼저 쓰인 문헌이 1),
+    양식만 봐서는 어느 문헌인지 알 수 없다.
+    """
+    names = {d["id"]: d["name"] for d in docs}
+    return [f"인용발명 {i + 1}: {names.get(doc_id, doc_id)}" for i, doc_id in enumerate(numbering)]
+
+
 def full_text(result: dict) -> str:
-    """청구항 양식 뒤에 종속항 양식을 이어 붙인 전체 글."""
-    return "\n\n".join(t for t in (result.get("text"), result.get("dep_text")) if t)
+    """대응표, 청구항 양식, 종속항 양식을 이어 붙인 전체 글."""
+    return "\n\n".join(t for t in ("\n".join(result.get("legend") or []), result.get("text"), result.get("dep_text")) if t)
 
 
 def save_result(out_dir: Path, result: dict) -> None:
@@ -1482,11 +1761,14 @@ def main() -> int:
     p.add_argument("--dependents", default="", help='종속항 텍스트 파일 ("[CLAIM 2]제1항에 있어서, …"). '
                    "--docs 없이 주면 저장된 청구항 결과 위에 종속항만 대비한다")
     p.add_argument("--dependents-only", action="store_true", help="청구항 대비는 저장된 결과를 쓰고 종속항만 대비한다")
+    p.add_argument("--add", action="store_true", help="--dependents 로 준 종속항을 이미 넣어 둔 종속항에 더한다. "
+                   "이미 대비한 항은 그대로 두고 새로 넣은 항만 판정한다 (번호가 같은 항은 새 글로 바꿔 다시 판정)")
+    p.add_argument("--keep", action="store_true", help="이미 대비한 종속항 가운데 글이 그대로인 항은 저장된 판정을 그대로 쓴다")
     p.add_argument("--alone", action="store_true", help="독립항 없이 종속항만 대비한다 (--dependents 와 --docs, --claim 은 필요 없음)")
-    p.add_argument("--out", default="", help="결과 폴더")
+    p.add_argument("--out", default="", help="결과 폴더 (기본: 프로그램 폴더의 compare_out)")
     p.add_argument("--cli", default="", choices=["", *llm.CLIS])
-    p.add_argument("--model", default=None, help="판정 모델 (기본: 설정의 스크리닝 모델)")
-    p.add_argument("--split-model", default=None, help="청구항을 특징으로 나누는 모델 (기본: 설정의 분석 모델)")
+    p.add_argument("--model", default=None, help="판정 모델 (기본: 설정의 구성대비 모델)")
+    p.add_argument("--split-model", default=None, help="청구항을 특징으로 나누는 모델 (기본: 설정의 구성대비 모델)")
     p.add_argument("--no-cache", action="store_true")
     args = p.parse_args()
 
@@ -1494,8 +1776,9 @@ def main() -> int:
     cli = args.cli or settings["cli"]
     llm.set_cli(cli)
     chosen = settings["models"].get(cli, {})
-    model = args.model if args.model is not None else chosen.get("screen_model", "")
-    split_model = args.split_model if args.split_model is not None else chosen.get("model", "")
+    compare_model = chosen.get("compare_model", "")
+    model = args.model if args.model is not None else compare_model
+    split_model = args.split_model if args.split_model is not None else compare_model
     alone = args.alone
     if args.run:
         run_dir = Path(args.run)
@@ -1517,7 +1800,7 @@ def main() -> int:
         if not alone and (not args.claim or not (args.docs or args.dependents or args.dependents_only)):
             p.error("--run 또는 (--claim 과 --docs) 를 지정하세요")
         claim_path = Path(args.claim) if args.claim else None
-        out_dir = Path(args.out or "compare_out")
+        out_dir = Path(args.out) if args.out else ROOT / "compare_out"  # 어디서 실행하든 프로그램 폴더 안에 둔다
         pdfs = [(f"d{i + 1}", "", Path(d)) for i, d in enumerate(args.docs)]
     if not alone and not claim_path.is_file():
         p.error(f"청구항 파일이 없습니다: {claim_path}")
@@ -1526,7 +1809,18 @@ def main() -> int:
     if args.dependents and not dep_path.is_file():
         p.error(f"종속항 파일이 없습니다: {dep_path}")
     dependents = dep_path.read_text(encoding="utf-8-sig").strip() if dep_path.is_file() else ""
-    dep_only = args.dependents_only or (not args.run and not args.docs)
+    dep_only = args.dependents_only or args.add or (not args.run and not args.docs)
+    merge_notes = []
+    if args.add:  # 넣어 둔 종속항에 더한다
+        if not args.dependents:
+            p.error("--add 는 --dependents 로 더 넣을 종속항 텍스트 파일을 함께 지정해야 합니다")
+        stored = out_dir / "dependents.txt"
+        old = stored.read_text(encoding="utf-8-sig") if stored.is_file() else ""
+        base = None if alone or not claim_path.is_file() else _claim_no(claim_path.read_text(encoding="utf-8-sig"))
+        try:
+            dependents, merge_notes, _ = claims.merge_dependents(old, dependents, base)
+        except claims.ClaimError as e:
+            p.error(str(e))
     if (dep_only or alone) and not dependents:
         p.error("종속항이 없습니다. --dependents 로 종속항 텍스트 파일을 지정하세요")
     if not dep_only and not pdfs:
@@ -1544,13 +1838,16 @@ def main() -> int:
     say(f"── {'종속항 ' if dep_only else ''}구성대비 시작 ({llm.CLIS[cli]['label']}, 구성 나누기 {split_model or '기본값'}, "
         f"판정 {model or '기본값'}" + ("" if dep_only else f", 인용발명 {len(pdfs)}건") + ")")
     cache = Cache(enabled=not args.no_cache)
+    keep = args.keep or args.add
+    for note in merge_notes:
+        say(f"  ! {note}")
     try:
         if alone:
             say("  독립항 없이 종속항만 대비합니다")
             result = run_alone(dependents, pdfs, out_dir, model, cache, say=say, split_model=split_model,
-                               reuse_docs=dep_only)
+                               reuse_docs=dep_only, keep=keep)
         elif dep_only:
-            result = run_dependents(claim, dependents, out_dir, model, cache, say=say, split_model=split_model)
+            result = run_dependents(claim, dependents, out_dir, model, cache, say=say, split_model=split_model, keep=keep)
         else:
             result = run_compare(claim, pdfs, out_dir, model, cache, say=say, split_model=split_model,
                                  dependents=dependents)

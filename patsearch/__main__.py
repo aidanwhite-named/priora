@@ -136,7 +136,7 @@ def main() -> int:
         clear_from(run_dir, args.from_stage)
     set_log(run_dir / "run.log")
     runs.write_status(run_dir, "running")
-    say(f"── {datetime.now():%Y-%m-%d %H:%M:%S} 실행 시작 ({llm.CLIS[cli]['label']}, 분석 모델 {model or '기본값'}, "
+    say(f"── {datetime.now():%Y-%m-%d %H:%M:%S} 실행 시작 ({llm.CLIS[cli]['label']}, 검색 모델 {model or '기본값'}, "
         f"스크리닝 모델 {screen_model or '기본값'}, 기준일 {before or '없음'})")
     say(f"실행 폴더: {run_dir}")
     try:
