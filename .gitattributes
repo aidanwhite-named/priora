@@ -1,0 +1,4 @@
+# 배치 파일은 줄 끝이 CRLF 가 아니면 cmd 가 잘못 읽는다. 어디서 받든(zip 포함) CRLF 로 나가게 한다.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

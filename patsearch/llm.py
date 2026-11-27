@@ -1,6 +1,6 @@
 """로컬에 설치된 LLM CLI 를 LLM 으로 쓴다. API 키 없이 각 CLI 의 로그인 계정으로 동작한다.
 
-지원: Claude Code(`claude -p`), Codex CLI(`codex exec`), Antigravity CLI(`agy -p`), Gemini CLI(`gemini -p`).
+지원: Claude Code(`claude -p`), Codex CLI(`codex exec`), Antigravity CLI(`agy -p`).
 새 CLI 를 붙이려면 CLIS 에 항목을 넣고 _call_<이름> 함수와 로그인 상태 확인(_status_<이름>)·AUTH 항목을 추가한다.
 """
 from __future__ import annotations
@@ -25,10 +25,12 @@ CLIS = {
                "screen_default": "haiku"},
     "codex": {"label": "Codex CLI", "exe": "codex", "models": [], "screen_default": ""},
     "antigravity": {"label": "Antigravity CLI", "exe": "agy",
-                    "models": ["gemini-4-neon-medium", "gemini-4-carbon-medium", "gemini-3.8-flash-medium",
-                               "gemini-3.8-flash-low", "claude-sonnet-5-5-medium", "claude-opus-5-5-medium"],
+                    # 로그인되어 있으면 `agy models` 로 받은 전체 목록(auth_status 의 models)이 화면에서 덧붙는다
+                    "models": ["gemini-4-neon-medium", "gemini-4-neon-high", "gemini-4-carbon-medium",
+                               "gemini-4-argon-medium", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high",
+                               "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+                               "claude-sonnet-5-5-medium", "claude-opus-5-5-medium"],
                     "screen_default": ""},
-    "gemini": {"label": "Gemini CLI", "exe": "gemini", "models": [], "screen_default": ""},
 }
 _current = "claude"
 
@@ -182,27 +184,7 @@ def _call_antigravity(prompt: str, model: str, timeout: int) -> str:
     return result["response"]
 
 
-def _call_gemini(prompt: str, model: str, timeout: int) -> str:
-    # -p 의 글 뒤에 표준입력 내용이 붙는다. 시스템 지시는 -p 로, 본문은 표준입력으로 보낸다.
-    cmd = [cli_path("gemini"), "--output-format", "json", "-p", SYSTEM]
-    if model:
-        cmd += ["-m", model]
-    code, stdout, stderr = _run(cmd, prompt, timeout, "Gemini CLI")
-    if not stdout:
-        raise LLMError(f"Gemini CLI 출력이 없습니다 (exit {code}): {stderr[-500:]}")
-    try:
-        outer = _extract_json(stdout)
-    except ValueError:
-        raise LLMError(f"Gemini CLI 출력 해석 실패: {stdout[:500]}") from None
-    if not isinstance(outer, dict) or outer.get("error") or not outer.get("response"):
-        err = outer.get("error") if isinstance(outer, dict) else None
-        if isinstance(err, dict):
-            err = err.get("message")
-        raise LLMError(f"Gemini CLI 오류: {str(err or stderr or stdout)[:500]}")
-    return outer["response"]
-
-
-_CALLERS = {"claude": _call_claude, "codex": _call_codex, "antigravity": _call_antigravity, "gemini": _call_gemini}
+_CALLERS = {"claude": _call_claude, "codex": _call_codex, "antigravity": _call_antigravity}
 
 
 # --- 로그인 상태 · 로그인 · 로그아웃 ----------------------------------------------------
@@ -215,9 +197,6 @@ AUTH = {
     "antigravity": {"login": ["-i", "/login"], "logout_console": ["-i", "/logout"],
                     "hint_login": "로그인 안내가 나오지 않으면 이 창에서 /login 을 입력하세요.",
                     "hint_logout": "로그아웃되지 않았으면 이 창에서 /logout 을 입력하세요."},
-    "gemini": {"login": [], "logout_console": [],
-               "hint_login": "처음 실행이면 로그인 방법을 고르라는 안내가 나옵니다. 계정을 바꾸려면 /auth 를 입력하세요.",
-               "hint_logout": "이 창에서 /auth 를 입력해 로그인 방법을 바꾸세요."},
 }
 
 
@@ -259,24 +238,17 @@ def _status_codex(exe: str) -> dict:
 def _status_antigravity(exe: str) -> dict:
     # 로그인 상태를 묻는 명령이 없어, 로그인해야 받을 수 있는 모델 목록을 받아 본다
     code, out, err = _quick([exe, "models"], timeout=60)
-    models = [ln for ln in out.splitlines() if "\t" in ln]
+    models = [ln.split("\t", 1)[0].strip() for ln in out.splitlines() if "\t" in ln]
+    models = [m for m in models if m]
     if code == 0 and models:
-        return {"logged_in": True, "detail": f"Google 계정 · 쓸 수 있는 모델 {len(models)}개"}
+        return {"logged_in": True, "detail": f"Google 계정 · 쓸 수 있는 모델 {len(models)}개", "models": models}
     text = (err or out or "").strip()
     if code is None:
         return {"logged_in": None, "detail": text[:300]}
     return {"logged_in": False, "detail": ("로그인이 필요합니다. " + text[-200:]).strip()}
 
 
-def _status_gemini(exe: str) -> dict:
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
-        return {"logged_in": True, "detail": "API 키 사용 (환경변수)"}
-    if (Path.home() / ".gemini" / "oauth_creds.json").is_file():
-        return {"logged_in": True, "detail": "Google 계정 로그인"}
-    return {"logged_in": False, "detail": "로그인되어 있지 않습니다"}
-
-
-_STATUS = {"claude": _status_claude, "codex": _status_codex, "antigravity": _status_antigravity, "gemini": _status_gemini}
+_STATUS = {"claude": _status_claude, "codex": _status_codex, "antigravity": _status_antigravity}
 
 
 def auth_status(name: str) -> dict:
@@ -328,6 +300,15 @@ def logout(name: str) -> dict:
             raise LLMError(f"{CLIS[name]['label']} 로그아웃 실패: {(err or out or '응답 없음')[:300]}")
         return {"opened": False}
     _console(name, spec["logout_console"], spec.get("hint_logout", ""))
+    return {"opened": True}
+
+
+# 세 CLI 모두 `update` 하위 명령으로 스스로 최신 버전을 받는다. 진행 상황이 보이도록 새 콘솔 창에서 띄운다.
+UPDATE = {"claude": ["update"], "codex": ["update"], "antigravity": ["update"]}
+
+
+def update(name: str) -> dict:
+    _console(name, UPDATE[name], "최신 버전을 확인하고 설치합니다.")
     return {"opened": True}
 
 

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -19,8 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from . import claims, compare, llm, runs
-from .config import APP_NAME, APP_TAGLINE, ROOT, RUNS_DIR, env, load_env, load_settings, save_env, save_settings
+from . import claims, compare, llm, report, runs
+from .config import APP_NAME, APP_TAGLINE, CACHE_DIR, ROOT, RUNS_DIR, env, load_env, load_settings, save_env, save_settings
 from .openalex import OpenAlexError, search_works
 from .ops import OpsClient, OpsError
 
@@ -67,6 +68,27 @@ def _claim(run_dir: Path) -> str:
         return (run_dir / "00_claim.txt").read_text(encoding="utf-8-sig")
     except OSError:
         return ""
+
+
+def report_page(run_id: str, view: str) -> bytes:
+    """리포트 화면. 저장된 단계 파일로 그때그때 다시 그리므로 예전 기록에도 지금 화면 모양이 적용된다.
+    view="cands" 는 후보 문헌 표만 담은 화면이다."""
+    run_dir = run_dir_of(run_id)
+    saved = run_dir / "report.html"
+    if not saved.is_file():
+        raise ApiError(404, "파일이 없습니다")
+    try:
+        load = lambda name: json.loads((run_dir / name).read_text(encoding="utf-8"))
+        page = report.render(
+            _claim(run_dir), load("01_elements.json"), load("03_search_log.json"), load("04_candidates.json"),
+            load("05_screening.json"), before=str(runs.read_meta(run_dir).get("before") or ""), view=view,
+            when=datetime.fromtimestamp(saved.stat().st_mtime),
+        )
+        return page.encode("utf-8")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError):
+        if view == "full":
+            return saved.read_bytes()  # 단계 파일이 없거나 예전 형식이면 저장된 리포트를 그대로
+        raise ApiError(404, "이 기록에는 후보 문헌 자료가 남아 있지 않습니다. 전체 리포트를 여세요.") from None
 
 
 def _tail(path: Path, lines: int = 400) -> str:
@@ -170,7 +192,7 @@ def _clean_settings(raw: dict) -> dict:
     models = {}
     for cid in llm.CLIS:
         entry = (raw.get("models") or {}).get(cid) or {}
-        models[cid] = {"model": _clean_model(entry.get("model")), "screen_model": _clean_model(entry.get("screen_model"))}
+        models[cid] = {role: _clean_model(entry.get(role)) for role in ("model", "screen_model", "compare_model")}
     return {"cli": cli, "models": models, "max_screen": max_screen}
 
 
@@ -204,7 +226,8 @@ def check_connections() -> dict:
     results = []
     label = llm.CLIS[cli]["label"]
     seen = set()
-    for role, model in (("분석 모델", chosen.get("model", "")), ("스크리닝 모델", chosen.get("screen_model", ""))):
+    for role, model in (("검색 모델", chosen.get("model", "")), ("스크리닝 모델", chosen.get("screen_model", "")),
+                        ("구성대비 모델", chosen.get("compare_model", ""))):
         if model in seen:
             continue
         seen.add(model)
@@ -402,6 +425,8 @@ def compare_state(run_id: str) -> dict:
         st = runs.run_state(cdir)
         state, message = st["state"], st["message"]
     result = runs._read_json(cdir / "result.json") if state != "running" else None
+    if result and "legend" not in result:  # 대응표를 넣기 전에 저장한 결과
+        result["legend"] = compare.legend(result.get("numbering") or result.get("order") or [], docs)
     try:  # 화면에서 넣어 둔 종속항. 문헌을 바꿔 결과가 지워져도 이 글은 남는다
         dependents = (cdir / "dependents.txt").read_text(encoding="utf-8-sig").strip()
     except OSError:
@@ -477,10 +502,17 @@ def compare_start(run_id: str) -> dict:
 
 
 def compare_dependents(run_id: str, body: dict) -> dict:
-    """종속항을 저장하고, 끝나 있는 청구항 구성대비 결과 위에 종속항만 대비한다. 비워서 보내면 종속항 결과를 지운다."""
+    """종속항을 저장하고, 끝나 있는 청구항 구성대비 결과 위에 종속항만 대비한다. 비워서 보내면 종속항 결과를 지운다.
+
+    add: 넣어 둔 종속항에 더한다(청구항 2~9 를 대비한 뒤 10~20 을 더 넣는 경우). 이미 대비한 항은 저장된 판정을
+    그대로 두고 새로 넣은 항만 판정한다.
+    """
     run_dir = run_dir_of(run_id)
     cdir = run_dir / "compare"
     text = str(body.get("text") or "").strip()
+    add = bool(body.get("add"))
+    if add and not text:
+        raise ApiError(400, "더 넣을 종속항을 붙여 넣으세요")
     if _compare_running(run_id):
         raise ApiError(409, "이미 구성대비를 실행 중입니다")
     if not (cdir / "judgments.json").exists():
@@ -495,14 +527,23 @@ def compare_dependents(run_id: str, body: dict) -> dict:
         return compare_state(run_id)
     # 인용 관계는 프로그램이 읽으므로, 잘못된 입력은 LLM 을 부르기 전에 여기서 알려 준다
     try:
+        if add:
+            text = claims.merge_dependents(_stored_dependents(cdir), text, _base_no(run_dir))[0]
         deps, notes = claims.read_dependents(text, _base_no(run_dir))
     except claims.ClaimError as e:
         raise ApiError(400, str(e)) from None
     if not deps:
         raise ApiError(400, "대비할 종속항이 없습니다. " + " / ".join(notes))
     (cdir / "dependents.txt").write_text(text + "\n", encoding="utf-8")
-    _compare_spawn(run_id, ["--dependents-only"] + (["--alone"] if _no_base(run_dir) else []))
+    _compare_spawn(run_id, ["--dependents-only"] + (["--keep"] if add else []) + (["--alone"] if _no_base(run_dir) else []))
     return compare_state(run_id)
+
+
+def _stored_dependents(cdir: Path) -> str:
+    try:
+        return (cdir / "dependents.txt").read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return ""
 
 
 def claims_preview(body: dict) -> dict:
@@ -517,7 +558,13 @@ def claims_preview(body: dict) -> dict:
 
     base = None
     try:
-        if body.get("run"):
+        if body.get("run") and body.get("add"):
+            # 넣어 둔 종속항에 더하는 글: 합쳐서 읽어야 앞서 넣은 항(제5항 등)을 인용하는 관계가 바로 읽힌다
+            run_dir = run_dir_of(str(body["run"]))
+            merged, more, added = claims.merge_dependents(_stored_dependents(run_dir / "compare"), text, _base_no(run_dir))
+            deps, notes = claims.read_dependents(merged, _base_no(run_dir))
+            deps, notes = [d for d in deps if d["no"] in added], more + notes
+        elif body.get("run"):
             deps, notes = claims.read_dependents(text, _base_no(run_dir_of(str(body["run"]))))
         else:
             parts = claims.split_set(text)
@@ -527,7 +574,7 @@ def claims_preview(body: dict) -> dict:
     except claims.ClaimError as e:
         return {"error": str(e), "base": None, "deps": [], "notes": []}
     return {
-        "error": "", "base": base, "notes": notes,
+        "error": "", "base": base, "notes": notes, "add": bool(body.get("run") and body.get("add")),
         "deps": [{"no": d["no"], "ref_label": claims.ref_label(d["refs"]), "detached": bool(d.get("detached")),
                   "snippet": snip(d["body"])} for d in deps],
     }
@@ -596,7 +643,7 @@ def auth_action(name: str, action: str) -> dict:
     if not shutil.which(llm.CLIS[name]["exe"]):
         raise ApiError(400, f'{llm.CLIS[name]["label"]} 가 설치되어 있지 않습니다')
     try:
-        result = llm.login(name) if action == "login" else llm.logout(name)
+        result = {"login": llm.login, "logout": llm.logout, "update": llm.update}[action](name)
     except llm.LLMError as e:
         raise ApiError(400, str(e)) from None
     return {**result, "status": llm.auth_status(name)}
@@ -701,6 +748,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(run_detail(parts[2]))
                 if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "compare":
                     return self._json(compare_state(parts[2]))
+                if len(parts) == 3 and parts[0] == "runs" and parts[2] in ("report.html", "candidates.html"):
+                    view = "cands" if parts[2] == "candidates.html" else "full"
+                    return self._send(200, report_page(parts[1], view), "text/html; charset=utf-8")
                 if len(parts) == 3 and parts[0] == "runs" and parts[2] in SERVED_FILES:
                     path = run_dir_of(parts[1]) / parts[2]
                     if not path.is_file():
@@ -721,7 +771,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json(compare_dependents(parts[2], self._body()))
                     if parts[4] == "stop":
                         return self._json(compare_stop(parts[2]))
-                if len(parts) == 4 and parts[:2] == ["api", "auth"] and parts[3] in ("login", "logout"):
+                if len(parts) == 4 and parts[:2] == ["api", "auth"] and parts[3] in ("login", "logout", "update"):
                     return self._json(auth_action(parts[2], parts[3]))
                 if parts == ["api", "claims", "preview"]:
                     return self._json(claims_preview(self._body()))
@@ -758,6 +808,17 @@ class Handler(BaseHTTPRequestHandler):
         self._route("DELETE")
 
 
+class Server(ThreadingHTTPServer):
+    # 윈도우의 SO_REUSEADDR 는 같은 옵션으로 이미 열려 있는 포트에도 bind 를 허용한다. 그대로 두면 Priora 를 두 번
+    # 띄웠을 때 둘 다 8765 를 잡아 "사용 중이면 다음 번호"가 동작하지 않으므로, 윈도우에서는 포트를 독점으로 잡는다.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -768,12 +829,12 @@ def main() -> int:
     p.add_argument("--no-open", action="store_true", help="브라우저를 자동으로 열지 않음")
     args = p.parse_args()
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    # 포트를 지정하지 않았으면 8765 부터 비어 있는 포트를 찾는다
-    candidates = [args.port] if args.port else list(range(8765, 8775))
+    # 포트를 지정하지 않았으면 8765 부터 비어 있는 포트를 찾고, 열 개가 모두 막혀 있으면 윈도우가 주는 빈 포트를 쓴다
+    candidates = [args.port] if args.port else [*range(8765, 8775), 0]
     server = None
     for port in candidates:
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            server = Server(("127.0.0.1", port), Handler)
             break
         except OSError as e:
             last = e
@@ -784,10 +845,19 @@ def main() -> int:
     print(f"선행기술 검색 화면: {url}\n끄려면 이 창에서 Ctrl+C", flush=True)
     if not args.no_open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    # 이 폴더에서 띄운 화면이라는 표시. install.bat·uninstall.bat 이 다른 폴더의 Priora 와 구별해 이것만 끈다.
+    mark = CACHE_DIR / f"server-{os.getpid()}.json"
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        mark.write_text(json.dumps({"pid": os.getpid(), "port": server.server_address[1]}), encoding="utf-8")
+    except OSError:
+        pass
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n종료합니다.")
+    finally:
+        mark.unlink(missing_ok=True)
     return 0
 
 

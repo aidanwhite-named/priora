@@ -61,13 +61,16 @@ SETTINGS_FILE = ROOT / "settings.json"
 DEFAULT_SETTINGS = {
     "cli": "claude",
     "models": {
-        "claude": {"model": "sonnet", "screen_model": "haiku"},
-        "codex": {"model": "", "screen_model": ""},
-        "antigravity": {"model": "", "screen_model": ""},
-        "gemini": {"model": "", "screen_model": ""},
+        # model: 검색(구성 분해·검색식) · screen_model: 초록 스크리닝 · compare_model: 구성대비
+        "claude": {"model": "sonnet", "screen_model": "haiku", "compare_model": "sonnet"},
+        "codex": {"model": "", "screen_model": "", "compare_model": ""},
+        "antigravity": {"model": "", "screen_model": "", "compare_model": ""},
     },
     "max_screen": 300,
 }
+
+
+MODEL_ROLES = ("model", "screen_model", "compare_model")
 
 
 def load_settings() -> dict:
@@ -83,8 +86,8 @@ def load_settings() -> dict:
             settings["max_screen"] = saved["max_screen"]
         for cli, models in (saved.get("models") or {}).items():
             if isinstance(models, dict):
-                settings["models"].setdefault(cli, {"model": "", "screen_model": ""}).update(
-                    {k: str(v) for k, v in models.items() if k in ("model", "screen_model")}
+                settings["models"].setdefault(cli, {"model": "", "screen_model": "", "compare_model": ""}).update(
+                    {k: str(v) for k, v in models.items() if k in MODEL_ROLES}
                 )
     return settings
 

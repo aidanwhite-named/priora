@@ -50,8 +50,34 @@ details summary{cursor:pointer;color:var(--mute);font-size:12.5px}
 .bar button.on{border-color:var(--accent);color:var(--accent);font-weight:600}
 .bar input{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:5px 10px;font:inherit;min-width:220px}
 .note{color:var(--mute);font-size:12.5px;margin-top:8px}
-</style></head><body><main>
-<h1>__TITLE__</h1>
+.more{margin-top:10px;display:flex;gap:10px;align-items:center}
+.more button{border:1px solid var(--line);background:var(--card);color:var(--accent);border-radius:7px;padding:6px 14px;cursor:pointer;font:inherit;font-weight:600}
+.more button:hover{border-color:var(--accent)}
+.legend{margin:0 0 10px}.legend div{padding:2px 0}
+.el{cursor:default}
+/* 프로그램 화면 안에 끼워 보일 때는 제목을 화면 쪽에서 이미 보여 주므로 뺀다 */
+body.embed main{padding:14px 16px 30px}body.embed h1{display:none}
+body.cands h2{display:none}
+</style></head><body class="__VIEW__"><main>
+__BODY__</main>
+<script>
+if(window.top!==window)document.body.classList.add('embed');
+const rows=[...document.querySelectorAll('#cands tr[data-g]')],LIMIT=__LIMIT__,more=document.getElementById('more');let g='all',k='all',all=false;
+function apply(){const q=document.getElementById('q').value.toLowerCase();let n=0;
+rows.forEach(r=>{const ok=(g==='all'||r.dataset.g===g)&&(k==='all'||r.dataset.k===k)&&(!q||r.textContent.toLowerCase().includes(q));
+if(ok)n++;r.style.display=ok&&(all||n<=LIMIT)?'':'none'});
+document.getElementById('shown').textContent=n>LIMIT&&!all?'상위 '+LIMIT+'건 표시 · 조건에 맞는 문헌 '+n+'건':n+'건';
+more.hidden=n<=LIMIT;more.textContent=all?'상위 '+LIMIT+'건만 보기':'나머지 '+(n-LIMIT)+'건 더 보기';}
+document.querySelectorAll('.bar button').forEach(b=>b.onclick=()=>{const key=b.dataset.g?'g':'k';
+document.querySelectorAll('.bar button[data-'+key+']').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+if(key==='g')g=b.dataset.g;else k=b.dataset.k;apply()});
+more.onclick=()=>{all=!all;apply();if(!all)document.getElementById('cands').scrollIntoView({block:'nearest'})};
+document.getElementById('q').oninput=apply;apply();
+</script></body></html>
+"""
+
+# 전체 리포트의 위쪽(청구항 · 구성 분해 · 검색식 로그)
+FULL_TOP = """<h1>__TITLE__</h1>
 <div class="meta">__META__</div>
 <div class="tiles">__TILES__</div>
 <h2>청구항</h2><div class="card claim">__CLAIM__</div>
@@ -64,7 +90,15 @@ details summary{cursor:pointer;color:var(--mute);font-size:12.5px}
 <div class="scroll"><table>
 <tr><th>ID</th><th>DB</th><th>수준</th><th class="num">히트</th><th>상태</th><th>검색식</th><th>의도 / 수정 내용</th></tr>__LOG__</table></div>
 <div class="note">상태가 "사용"인 검색식의 결과만 후보에 들어갑니다. 0건·과다·오류·소량인 검색식은 LLM이 히트 수를 보고 다시 쓴 것이 아래 줄(r1, r2)에 이어집니다.</div>
-<h2>후보 문헌</h2>
+"""
+
+# 후보 문헌만 보는 화면의 위쪽
+CANDS_TOP = """<h1>__TITLE__</h1>
+<div class="meta">__META__</div>
+<details class="legend"><summary>구성 기호(__ELRANGE__) 설명 보기</summary>__LEGEND__</details>
+"""
+
+CANDS_BLOCK = """<h2>후보 문헌</h2>
 <div class="bar">
 <button data-g="all" class="on">전체</button><button data-g="high">상</button><button data-g="mid">중</button><button data-g="low">하</button>
 <button data-k="all" class="on">특허+논문</button><button data-k="patent">특허</button><button data-k="paper">논문</button>
@@ -72,19 +106,11 @@ details summary{cursor:pointer;color:var(--mute);font-size:12.5px}
 <span class="mute" id="shown"></span></div>
 <div class="scroll"><table id="cands">
 <tr><th>#</th><th>점수</th><th>구성별</th><th>문헌</th><th>제목 / 판단 근거</th><th>공개일</th><th>검색식</th></tr>__CANDS__</table></div>
+<div class="more"><button id="more" hidden></button></div>
 <div class="note">점수는 제목·초록만 보고 매긴 1차 선별값입니다(구성별 0=언급 없음, 1=부분 관련, 2=명시적 대응). 순위와 등급은 ★ 표시된 차별점 구성이 먼저 결정합니다: ★가 2점이어야 "상", 1점 이상이어야 "중"입니다. "수단 가설"은 청구항이 효과로만 적은 구성을 달성하는 통상적 수단을 LLM이 추정한 것으로, 그 수단이 같은 상황에서 쓰이면 대응으로 봅니다. 초록에 없는 내용은 반영되지 않으므로 "하"라고 해서 무관하다는 뜻은 아니며, 최종 판단은 전문을 읽고 해야 합니다.</div>
-</main>
-<script>
-const rows=[...document.querySelectorAll('#cands tr[data-g]')];let g='all',k='all';
-function apply(){const q=document.getElementById('q').value.toLowerCase();let n=0;
-rows.forEach(r=>{const ok=(g==='all'||r.dataset.g===g)&&(k==='all'||r.dataset.k===k)&&(!q||r.textContent.toLowerCase().includes(q));
-r.style.display=ok?'':'none';if(ok)n++});document.getElementById('shown').textContent=n+' / '+rows.length+'건';}
-document.querySelectorAll('.bar button').forEach(b=>b.onclick=()=>{const key=b.dataset.g?'g':'k';
-document.querySelectorAll('.bar button[data-'+key+']').forEach(x=>x.classList.remove('on'));b.classList.add('on');
-if(key==='g')g=b.dataset.g;else k=b.dataset.k;apply()});
-document.getElementById('q').oninput=apply;apply();
-</script></body></html>
 """
+
+CANDS_LIMIT = 10  # 후보 문헌 표에 처음 보여 주는 건수 (나머지는 "더 보기")
 
 
 def esc(value) -> str:
@@ -100,6 +126,12 @@ def _tile(value, label) -> str:
 
 
 def write_report(path: Path, claim: str, decomp: dict, log: list, candidates: list, screening: list, settings) -> None:
+    path.write_text(render(claim, decomp, log, candidates, screening, settings.before), encoding="utf-8")
+
+
+def render(claim: str, decomp: dict, log: list, candidates: list, screening: list, before: str = "",
+           view: str = "full", when: datetime | None = None) -> str:
+    """리포트 HTML. view="cands" 이면 후보 문헌 표만 담는다. when 은 리포트를 만든 시각(없으면 지금)."""
     screen_by_key = {r["key"]: r for r in screening}
     element_ids = [e["id"] for e in decomp.get("elements", [])]
     key_ids = [e["id"] for e in decomp.get("elements", []) if e.get("role") == "key"] or [
@@ -148,6 +180,7 @@ def write_report(path: Path, claim: str, decomp: dict, log: list, candidates: li
             key_score = sum((r.get("scores") or {}).get(k, 0) for k in key_ids)
         return (grade_rank.get(r.get("grade"), 3), -key_score, -score, -c.get("prescore", 0))
 
+    el_title = {e["id"]: e.get("summary_ko") or e.get("text_ko", "") for e in decomp.get("elements", [])}
     cands_html, shown = "", 0
     for c in sorted(candidates, key=sort_key):
         r = screen_by_key.get(c["key"])
@@ -157,7 +190,7 @@ def write_report(path: Path, claim: str, decomp: dict, log: list, candidates: li
         grade = r["grade"]
         score = "–" if r.get("score") is None else r["score"]
         per_el = "".join(
-            f'<span class="el v{r["scores"].get(k, 0)}">{esc(k)}{"★" if k in key_ids else ""} {r["scores"].get(k, 0)}</span>'
+            f'<span class="el v{r["scores"].get(k, 0)}" title="{esc(el_title.get(k, ""))}">{esc(k)}{"★" if k in key_ids else ""} {r["scores"].get(k, 0)}</span>'
             for k in element_ids
         ) if r.get("scores") else ""
         if c["kind"] == "patent":
@@ -196,25 +229,38 @@ def write_report(path: Path, claim: str, decomp: dict, log: list, candidates: li
         + _tile(grades["high"], "관련도 상")
         + _tile(grades["mid"], "관련도 중")
     )
-    meta = f'{datetime.now():%Y-%m-%d %H:%M} 작성'
-    if settings.before:
-        meta += f' · 기준일 {_date(settings.before)} 이전 공개 문헌'
+    meta = f'{when or datetime.now():%Y-%m-%d %H:%M} 작성'
+    if before:
+        meta += f' · 기준일 {_date(before)} 이전 공개 문헌'
     else:
         meta += " · 기준일 미지정(공개일 제한 없음)"
     cpc = ", ".join(
         f'{esc(c.get("symbol", ""))} <span class="mute">{esc(c.get("desc_ko", ""))}</span>' for c in decomp.get("cpc", [])
     )
-    title = f'선행기술 검색 — {decomp.get("title_en", "")}'
-    page = (
-        TEMPLATE.replace("__TITLE__", esc(title))
+    if view == "cands":
+        title = f'후보 문헌 — {decomp.get("title_en", "")}'
+        meta += f' · 스크리닝 {len(screening)}건 중 상 {grades["high"]} · 중 {grades["mid"]}'
+        legend = "".join(
+            f'<div><b>{esc(k)}{"★" if k in key_ids else ""}</b> {esc(el_title.get(k, ""))}</div>' for k in element_ids
+        )
+        el_range = esc(", ".join(element_ids))
+        body = CANDS_TOP.replace("__LEGEND__", legend).replace("__ELRANGE__", el_range) + CANDS_BLOCK
+    else:
+        title = f'선행기술 검색 — {decomp.get("title_en", "")}'
+        body = FULL_TOP + CANDS_BLOCK
+    # 틀을 먼저 맞춘 뒤 내용을 넣는다 (내용에 같은 표식이 있어도 틀이 흐트러지지 않게, 사용자 글은 맨 뒤에)
+    return (
+        TEMPLATE.replace("__BODY__", body)
+        .replace("__VIEW__", "cands" if view == "cands" else "full")
+        .replace("__LIMIT__", str(CANDS_LIMIT))
+        .replace("__TITLE__", esc(title))
         .replace("__META__", meta)
         .replace("__TILES__", tiles)
-        .replace("__CLAIM__", esc(claim))
         .replace("__GIST__", esc(decomp.get("gist_ko", "")))
         .replace("__POINT__", esc(decomp.get("distinguishing_point_ko", "")))
         .replace("__ELEMENTS__", elements_html)
         .replace("__CPC__", cpc)
         .replace("__LOG__", log_html)
         .replace("__CANDS__", cands_html)
+        .replace("__CLAIM__", esc(claim))
     )
-    path.write_text(page, encoding="utf-8")

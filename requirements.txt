@@ -1,0 +1,5 @@
+# Installed into .venv by install.bat. Keep this file ASCII-only: pip reads it with the
+# Windows code page and fails on other characters.
+# Search uses the standard library only; PyMuPDF reads the PDFs for claim comparison.
+# Pinned to the version the PDF paragraph reading was developed and checked against.
+pymupdf==1.25.3
